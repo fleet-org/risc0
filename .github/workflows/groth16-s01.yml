@@ -16,7 +16,7 @@ on:
       - 'risc0/groth16-oxide/**'
       - 'risc0/groth16-sys/**'
       - 'risc0/groth16/**'
-      - 'groth16_s01/**'
+      - 'groth16_s01/harness/**'
       - '.github/workflows/groth16-s01.yml'
   pull_request:
     branches: [integration/staging-platform]
@@ -26,7 +26,7 @@ on:
       - 'risc0/groth16-oxide/**'
       - 'risc0/groth16-sys/**'
       - 'risc0/groth16/**'
-      - 'groth16_s01/**'
+      - 'groth16_s01/harness/**'
       - '.github/workflows/groth16-s01.yml'
 
 concurrency:

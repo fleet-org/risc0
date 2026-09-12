@@ -114,8 +114,8 @@ pub fn parse_preprocessed_coeffs(
     }
     let r_inv = r_inverse();
     let read_list = |offset: usize,
-                         count: usize,
-                         matrix: u32|
+                     count: usize,
+                     matrix: u32|
      -> Result<(Vec<GroupedCoeff>, Vec<u32>), ArtifactError> {
         let mut coeffs = Vec::with_capacity(count);
         let mut constraints = Vec::new();
