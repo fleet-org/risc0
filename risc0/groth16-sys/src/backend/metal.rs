@@ -24,7 +24,7 @@ use risc0_groth16_core::{
     prover::{proof_json, public_json, CoefficientGroups},
     zkey::{parse_witness_values, Zkey},
 };
-use risc0_groth16_metal::device::{MetalProver, ResidentZkey};
+use risc0_groth16_metal::device::{MetalBackend, MetalProver, ResidentZkey};
 
 use super::{reference::random_scalar, resident, BackendKind, Groth16Backend};
 use crate::{ProverParams, SetupParams};
@@ -79,7 +79,7 @@ impl Groth16Backend for Metal {
 /// The device, its pipelines, and the zkey resident on it.
 struct Prepared {
     device: MetalProver,
-    resident: ResidentZkey,
+    resident: ResidentZkey<MetalBackend>,
 }
 
 static CACHE: resident::Cache<Prepared> = resident::Cache::new();

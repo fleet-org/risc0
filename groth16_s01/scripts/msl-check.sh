@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Syntax pass over the Metal arm's shaders on a machine without Metal: concatenate the sources the
 # way `risc0_groth16_metal::MSL_SOURCE` does and compile them as C++14 against a stub <metal_stdlib>
-# (msl-stub/, force-included: consts.metal precedes the shader's own #include, as MSL allows), with
+# (risc0/groth16-metal/msl-host/, the same stub the crate's host backend compiles the shaders
+# with; force-included: consts.metal precedes the shader's own #include, as MSL allows), with
 # MSL's built-in type names poisoned so that using one as an identifier is an error.
 # Catches: C++ syntax errors, undeclared names, and reserved-type-name identifiers (I-G16-019).
 # Does not catch: anything semantic (address spaces, attribute meaning, arithmetic).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 CXX=${CXX:-g++}
-stub=groth16_s01/scripts/msl-stub
+stub=risc0/groth16-metal/msl-host
 parse() {
   "$CXX" -std=c++14 -x c++ -fsyntax-only -isystem "$stub" -include "$stub/metal_stdlib" "$@"
 }

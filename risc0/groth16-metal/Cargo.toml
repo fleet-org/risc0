@@ -24,3 +24,7 @@ metal = { workspace = true }
 [dev-dependencies]
 ark-bn254 = "0.5.0"
 ark-ff = "0.5.0"
+
+[build-dependencies]
+# compiles the Metal shaders as C++ for the host backend on every target but macOS
+cc = "1"
