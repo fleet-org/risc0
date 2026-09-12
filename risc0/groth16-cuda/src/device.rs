@@ -27,15 +27,12 @@ use risc0_groth16_core::{
     ec::{Affine, Jacobian},
     field::{Field, Fp, Fr},
     fp2::Fp2,
-    prover::{
-        assemble, counting_sort_by_digit, horner, reduce_buckets, CoefficientGroups, Msms, Proof,
-        ProveError, Tables,
-    },
+    prover::{assemble, horner, CoefficientGroups, Msms, Proof, ProveError, Tables},
     zkey::Zkey,
 };
 use risc0_groth16_oxide::{
     abi,
-    pipeline::WINDOW_BITS,
+    pipeline::{reduce_all_windows, sort_all_windows, WINDOW_BITS},
     schedule::{self, Buf, Step, Twiddles},
 };
 
@@ -266,8 +263,10 @@ impl CudaProver {
         Ok(pick(sched.result))
     }
 
-    /// One MSM: digits on the device, counting sort on the host, bucket sums
-    /// on the device, reduction and Horner on the host — the Metal arm's split.
+    /// One MSM over every window at once: one `digits_all` launch, the host
+    /// sort (`pipeline::sort_all_windows`), one `bucket_sum` launch over
+    /// `windows · buckets` outputs, then the reduction and Horner on the host
+    /// — two launches and two reads per MSM instead of two per window.
     fn msm<F: Field + Copy>(
         &self,
         kernel: &str,
@@ -278,37 +277,33 @@ impl CudaProver {
         let n = scalars.len();
         let w = WINDOW_BITS;
         let buckets = (1usize << w) - 1;
-        let windows = 256u32.div_ceil(w);
+        let windows = 256u32.div_ceil(w) as usize;
         let canonical: Vec<[u64; 4]> = scalars.iter().map(Fr::to_canonical).collect();
         let canonical_b = self.upload(&canonical)?;
-        let digits_b: Buffer<u32> = self.alloc(n)?;
-        let sums_b: Buffer<Jacobian<F>> = self.alloc(buckets)?;
-        let mut window_sums = Vec::with_capacity(windows as usize);
-        for window in 0..windows {
-            self.run(
-                abi::DIGITS,
-                ptr(&digits_b),
-                n,
-                &[&slice(&canonical_b)[..], &[Arg::U32(window), Arg::U32(w)]].concat(),
-            )?;
-            let digits = self.read(&digits_b)?;
-            let (order, starts) = counting_sort_by_digit(&digits, buckets);
-            if order.is_empty() {
-                window_sums.push(Jacobian::INFINITY);
-                continue;
-            }
-            let order_b = self.upload(&order)?;
-            let starts_b = self.upload(&starts)?;
-            self.run(
-                kernel,
-                ptr(&sums_b),
-                buckets,
-                &[&slice(points)[..], &slice(&order_b), &slice(&starts_b)].concat(),
-            )?;
-            let sums = self.read(&sums_b)?;
-            window_sums.push(reduce_buckets(&sums));
+        let digits_b: Buffer<u32> = self.alloc(windows * n)?;
+        self.run(
+            abi::DIGITS_ALL,
+            ptr(&digits_b),
+            windows * n,
+            &[&slice(&canonical_b)[..], &[Arg::U32(w)]].concat(),
+        )?;
+        let digits = self.read(&digits_b)?;
+        drop((digits_b, canonical_b));
+        let (order, starts) = sort_all_windows(&digits, n, buckets);
+        if order.is_empty() {
+            return Ok(Jacobian::INFINITY);
         }
-        Ok(horner(&window_sums, w))
+        let order_b = self.upload(&order)?;
+        let starts_b = self.upload(&starts)?;
+        let sums_b: Buffer<Jacobian<F>> = self.alloc(windows * buckets)?;
+        self.run(
+            kernel,
+            ptr(&sums_b),
+            windows * buckets,
+            &[&slice(points)[..], &slice(&order_b), &slice(&starts_b)].concat(),
+        )?;
+        let sums = self.read(&sums_b)?;
+        Ok(horner(&reduce_all_windows(&sums, buckets), w))
     }
 
     /// Produce a proof: the arm's implementation of the boundary.
@@ -630,6 +625,20 @@ impl CudaProver {
                 } else {
                     format!("windows {bad:?} differ")
                 })
+            })(),
+        );
+        record(
+            abi::DIGITS_ALL,
+            (|| {
+                let sb = self.upload(&c.wide_canonical())?;
+                let o: Buffer<u32> = self.alloc(WINDOWS as usize * n)?;
+                self.run(
+                    abi::DIGITS_ALL,
+                    ptr(&o),
+                    WINDOWS as usize * n,
+                    &[&slice(&sb)[..], &[Arg::U32(WINDOW_BITS)]].concat(),
+                )?;
+                Ok(first_diff(&self.read(&o)?, &c.digits_all()))
             })(),
         );
         // bucket sums on G1 and G2: infinity input, empty bucket, P + (−P), P + P

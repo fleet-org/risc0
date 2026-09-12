@@ -29,12 +29,11 @@ use risc0_groth16_core::{
     ec::Jacobian,
     field::{Field, Fr},
     fp2::Fp2,
-    prover::{
-        assemble, counting_sort_by_digit, horner, reduce_buckets, CoefficientGroups, Msms, Proof,
-        ProveError, Tables,
-    },
+    prover::{assemble, horner, CoefficientGroups, Msms, Proof, ProveError, Tables},
     zkey::Zkey,
 };
+
+use risc0_groth16_oxide::pipeline::{reduce_all_windows, sort_all_windows};
 
 use crate::{pack, MSL_SOURCE, WINDOW_BITS};
 
@@ -46,6 +45,7 @@ const KERNELS: &[&str] = &[
     "bit_reverse",
     "ntt_stage",
     "digits",
+    "digits_all",
     "bucket_sum_g1",
     "bucket_sum_g2",
 ];
@@ -222,8 +222,10 @@ impl MetalProver {
         pick(sched.result)
     }
 
-    /// One MSM: digits on the device, counting sort on the host, bucket sums on
-    /// the device, reduction and Horner on the host.
+    /// One MSM over every window at once: one `digits_all` launch, the host
+    /// sort (`pipeline::sort_all_windows`), one `bucket_sum` launch over
+    /// `windows · buckets` outputs, then the reduction and Horner on the host
+    /// — two launches and two reads per MSM instead of two per window.
     fn msm<F: Field>(
         &self,
         kernel: &str,
@@ -237,54 +239,46 @@ impl MetalProver {
         let n = scalars.len();
         let w = WINDOW_BITS;
         let buckets = (1usize << w) - 1;
-        let windows = 256u32.div_ceil(w);
+        let windows = 256u32.div_ceil(w) as usize;
+        let u32s = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>();
         let canonical = self.upload(&pack::pack_canonical(scalars));
-        let digits = self.alloc(n * 4);
-        let sums = self.alloc(buckets * point_bytes * 3 / 2);
-        let mut window_sums = Vec::with_capacity(windows as usize);
-        for window in 0..windows {
-            self.run(
-                "digits",
-                n,
-                &[
-                    Arg::Buf(&canonical),
-                    Arg::Bytes(&window.to_le_bytes()),
-                    Arg::Bytes(&w.to_le_bytes()),
-                    Arg::Buf(&digits),
-                ],
-            );
-            let d: Vec<u32> = self
-                .read(&digits, n * 4)
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-                .collect();
-            let (order, starts) = counting_sort_by_digit(&d, buckets);
-            let order_b = self.upload(
-                &order
-                    .iter()
-                    .flat_map(|x| x.to_le_bytes())
-                    .collect::<Vec<_>>(),
-            );
-            let starts_b = self.upload(
-                &starts
-                    .iter()
-                    .flat_map(|x| x.to_le_bytes())
-                    .collect::<Vec<_>>(),
-            );
-            self.run(
-                kernel,
-                buckets,
-                &[
-                    Arg::Buf(points),
-                    Arg::Buf(&order_b),
-                    Arg::Buf(&starts_b),
-                    Arg::Buf(&sums),
-                ],
-            );
-            let jac = unpack(&self.read(&sums, buckets * point_bytes * 3 / 2));
-            window_sums.push(reduce_buckets(&jac));
+        let digits_b = self.alloc(windows * n * 4);
+        self.run(
+            "digits_all",
+            windows * n,
+            &[
+                Arg::Buf(&canonical),
+                Arg::Bytes(&(n as u32).to_le_bytes()),
+                Arg::Bytes(&w.to_le_bytes()),
+                Arg::Buf(&digits_b),
+            ],
+        );
+        let digits: Vec<u32> = self
+            .read(&digits_b, windows * n * 4)
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        drop((digits_b, canonical));
+        let (order, starts) = sort_all_windows(&digits, n, buckets);
+        if order.is_empty() {
+            return Jacobian::INFINITY;
         }
-        horner(&window_sums, w)
+        let order_b = self.upload(&u32s(&order));
+        let starts_b = self.upload(&u32s(&starts));
+        let sum_bytes = point_bytes * 3 / 2;
+        let sums = self.alloc(windows * buckets * sum_bytes);
+        self.run(
+            kernel,
+            windows * buckets,
+            &[
+                Arg::Buf(points),
+                Arg::Buf(&order_b),
+                Arg::Buf(&starts_b),
+                Arg::Buf(&sums),
+            ],
+        );
+        let jac = unpack(&self.read(&sums, windows * buckets * sum_bytes));
+        horner(&reduce_all_windows(&jac, buckets), w)
     }
 
     /// Produce a proof: the arm's implementation of the boundary — upload the
@@ -630,6 +624,30 @@ impl MetalProver {
                 } else {
                     format!("windows {bad:?} differ")
                 },
+            ));
+        }
+        {
+            let canonical = self.upload(&pack::pack_canonical(&c.wide));
+            let total = WINDOWS as usize * n;
+            let db = self.alloc(total * 4);
+            self.run(
+                "digits_all",
+                total,
+                &[
+                    Arg::Buf(&canonical),
+                    Arg::Bytes(&(n as u32).to_le_bytes()),
+                    Arg::Bytes(&WINDOW_BITS.to_le_bytes()),
+                    Arg::Buf(&db),
+                ],
+            );
+            let got: Vec<u32> = self
+                .read(&db, total * 4)
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            out.push(KernelCheck::from_detail(
+                "digits_all",
+                first_diff(&got, &c.digits_all()),
             ));
         }
         // bucket sums on G1 and G2: infinity input, empty bucket, P + (−P), P + P

@@ -464,6 +464,27 @@ kernel void digits(device const uint* scalars [[buffer(0)]],
     out[i] = d & ((1u << w) - 1u);
 }
 
+kernel void digits_all(device const uint* scalars [[buffer(0)]],
+                       constant uint& n [[buffer(1)]],
+                       constant uint& w [[buffer(2)]],
+                       device uint* out [[buffer(3)]],
+                       uint i [[thread_position_in_grid]]) {
+    // every window in one launch: output i is scalar i % n, window i / n
+    uint s = i % n;
+    uint window = i / n;
+    uint bit = window * w;
+    uint limb = bit / 32u;
+    uint shift = bit % 32u;
+    uint d = 0;
+    if (limb < 8u) {
+        d = scalars[s * 8u + limb] >> shift;
+        if (shift + w > 32u && limb + 1u < 8u) {
+            d |= scalars[s * 8u + limb + 1u] << (32u - shift);
+        }
+    }
+    out[i] = d & ((1u << w) - 1u);
+}
+
 kernel void bucket_sum_g1(device const Aff<Fp>* points [[buffer(0)]],
                           device const uint* order [[buffer(1)]],
                           device const uint* starts [[buffer(2)]],

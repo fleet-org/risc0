@@ -235,6 +235,14 @@ impl Cases {
             .collect()
     }
 
+    /// Expected `digits_all(wide)`: every window's digits in one buffer.
+    pub fn digits_all(&self) -> Vec<u32> {
+        let canonical = self.wide_canonical();
+        (0..WINDOWS as usize * self.n)
+            .map(|i| kernels::digit_all(i, &canonical, WINDOW_BITS))
+            .collect()
+    }
+
     /// Expected G1 bucket sums.
     pub fn bucket_sums_g1(&self) -> Vec<Jacobian<Fp>> {
         (0..self.buckets())
@@ -358,6 +366,11 @@ mod tests {
         // every window has a non-zero digit somewhere on full-width scalars
         for w in 0..WINDOWS {
             assert!(c.digits(w).iter().any(|&d| d != 0), "window {w}");
+        }
+        // digits_all is the windows' digits concatenated
+        let all = c.digits_all();
+        for w in 0..WINDOWS as usize {
+            assert_eq!(&all[w * c.n..(w + 1) * c.n], &c.digits(w as u32)[..]);
         }
     }
 

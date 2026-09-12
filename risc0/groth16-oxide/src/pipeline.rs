@@ -109,9 +109,34 @@ pub fn h_to_coset_with<L: Launcher>(
     result
 }
 
-/// MSM through the kernels: digits per window on the device, a counting sort
-/// by digit on the host, bucket sums on the device, the bucket reduction and
-/// Horner combination on the host.
+/// The host's half of an all-windows MSM: counting-sort each window's digits
+/// (`digits[w·n..(w+1)·n]`) and lay the results out flat — `order` is every
+/// window's sorted point indices concatenated, `starts` has one entry per
+/// `(window, bucket)` plus a final end, in absolute `order` offsets — so one
+/// `bucket_sum` launch over `windows · buckets` outputs sums every window.
+pub fn sort_all_windows(digits: &[u32], n: usize, buckets: usize) -> (Vec<u32>, Vec<u32>) {
+    assert_eq!(digits.len() % n, 0, "digits must hold whole windows");
+    let windows = digits.len() / n;
+    let mut order = Vec::with_capacity(digits.len());
+    let mut starts = Vec::with_capacity(windows * buckets + 1);
+    for w in 0..windows {
+        let (o, s) = counting_sort_by_digit(&digits[w * n..(w + 1) * n], buckets);
+        let base = order.len() as u32;
+        starts.extend(s[..buckets].iter().map(|x| base + x));
+        order.extend_from_slice(&o);
+    }
+    starts.push(order.len() as u32);
+    (order, starts)
+}
+
+/// Window sums from the flat bucket sums (`windows · buckets` entries).
+pub fn reduce_all_windows<F: Field>(sums: &[Jacobian<F>], buckets: usize) -> Vec<Jacobian<F>> {
+    sums.chunks_exact(buckets).map(reduce_buckets).collect()
+}
+
+/// A multi-scalar multiplication over every window at once: one digits
+/// launch, one host sort, one bucket-sum launch, then the reduction and
+/// Horner on the host — two launches per MSM instead of two per window.
 pub fn msm<L: Launcher, F: Field + Send + Sync>(
     l: &L,
     points: &[Affine<F>],
@@ -119,21 +144,18 @@ pub fn msm<L: Launcher, F: Field + Send + Sync>(
 ) -> Jacobian<F> {
     assert_eq!(points.len(), scalars.len());
     let canonical: Vec<[u64; 4]> = scalars.iter().map(Fr::to_canonical).collect();
+    let n = points.len();
     let w = WINDOW_BITS;
     let buckets = (1usize << w) - 1;
-    let windows = 256u32.div_ceil(w);
-    let mut window_sums = Vec::with_capacity(windows as usize);
-    let mut digits = vec![0u32; points.len()];
-    for window in 0..windows {
-        l.map(&mut digits, |i| kernels::digit(i, &canonical, window, w));
-        let (order, starts) = counting_sort_by_digit(&digits, buckets);
-        let mut sums = vec![Jacobian::<F>::INFINITY; buckets];
-        l.map(&mut sums, |b| {
-            kernels::bucket_sum(b, points, &order, &starts)
-        });
-        window_sums.push(reduce_buckets(&sums));
-    }
-    horner(&window_sums, w)
+    let windows = 256u32.div_ceil(w) as usize;
+    let mut digits = vec![0u32; windows * n];
+    l.map(&mut digits, |i| kernels::digit_all(i, &canonical, w));
+    let (order, starts) = sort_all_windows(&digits, n, buckets);
+    let mut sums = vec![Jacobian::<F>::INFINITY; windows * buckets];
+    l.map(&mut sums, |b| {
+        kernels::bucket_sum(b, points, &order, &starts)
+    });
+    horner(&reduce_all_windows(&sums, buckets), w)
 }
 
 /// The arm's prover: the canonical kernel sequence on a launcher, the
