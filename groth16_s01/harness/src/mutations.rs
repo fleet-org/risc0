@@ -66,21 +66,42 @@ pub fn bit_flip(seal: &[u8], claim: &MaybePruned<ReceiptClaim>) -> Arm {
     Arm::Killed("one bit flipped in each of pi_a, pi_b, pi_c: all rejected".into())
 }
 
-/// Arm: the seal against another case's claim.
+/// Arm: the seal against another statement's public inputs. Prefers another
+/// case's claim; when none is given, or it is the same statement (two runs of
+/// one guest with the same journal share a claim digest — the claim does not
+/// encode work), falls back to a FOREIGN claim derived from the case's own
+/// claim digest with one bit flipped, and says so in the result.
 pub fn cross_claim(
     seal: &[u8],
     own: &MaybePruned<ReceiptClaim>,
     other: Option<&MaybePruned<ReceiptClaim>>,
 ) -> Arm {
-    let Some(other) = other else {
-        return Arm::NotRun("no second case available for a cross-claim check".into());
+    let own_digest = oracle::claim_digest(own);
+    let (foreign, label): (MaybePruned<ReceiptClaim>, String) = match other {
+        Some(other) if oracle::claim_digest(other) != own_digest => {
+            (other.clone(), "another case's claim".into())
+        }
+        Some(_) => {
+            let mut d = own_digest;
+            d.as_mut_bytes()[0] ^= 0x01;
+            (
+                MaybePruned::Pruned(d),
+                "the other case has the same claim digest; used the own digest with bit 0 flipped"
+                    .into(),
+            )
+        }
+        None => {
+            let mut d = own_digest;
+            d.as_mut_bytes()[0] ^= 0x01;
+            (
+                MaybePruned::Pruned(d),
+                "no second case; used the own digest with bit 0 flipped".into(),
+            )
+        }
     };
-    if oracle::claim_digest(other) == oracle::claim_digest(own) {
-        return Arm::NotRun("the other case has the same claim digest".into());
-    }
-    match oracle::verify(seal, other) {
-        Ok(()) => Arm::Survived("verified against another case's claim".into()),
-        Err(e) => Arm::Killed(format!("rejected: {e}")),
+    match oracle::verify(seal, &foreign) {
+        Ok(()) => Arm::Survived(format!("verified against a foreign claim ({label})")),
+        Err(e) => Arm::Killed(format!("rejected against {label}: {e}")),
     }
 }
 

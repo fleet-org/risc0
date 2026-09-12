@@ -37,9 +37,20 @@ groth16-s01-harness run cases/<case> <artifacts-dir> <kind> [--control <kind>] [
 
 _Filled in per run; each row is MEASURED on the host named._
 
-### Synthetic case, reference arm, CRCS host (no GPU)
+### Synthetic cases, reference arm, CRCS host (no GPU) — MEASURED 2026-09-12
 
-_pending_
+Host: an unprivileged CRCS container, 24 CPU cores, 30 GB RAM shared with the host, no CUDA userland, no macOS. Artifacts: rzup `risc0-groth16` v0.1.0 (`stark_verify_final.zkey` 3.45 GiB, num_vars 5,635,930, num_public 5, domain 2^23; SHA-256 of the archive matches the signed distribution manifest). Versions: risc0-zkvm 3.0.4, risc0-groth16 3.0.3, risc0-groth16-sys 0.1.0 (the base tag). Stage inputs: the in-tree `loop` guest proven to a succinct receipt on this host (0 iterations: 11.9 s; 100,000 iterations: 32.2 s). **These are synthetic stage inputs, not corpus cases**: no canonical output exists for them, so assertions 2 and 3 are `not run` by construction, and the `canonical answers` arm is `not run` because the canonical CUDA backend is not compiled into this host's harness.
+
+| case | rewrite | canonical verifies (3) | rewrite verifies (1) | same public inputs (2) | bit-flip rejected (4) | cross-claim rejected | canonical answers | malformed input | derive s | prove s |
+|---|---|---|---|---|---|---|---|---|---:|---:|
+| synthetic-loop-0 | reference | not run (the case carries no canonical output (synthetic or not captured)) | yes | not run (no canonical output to compare claims with) | killed (one bit flipped in each of pi_a, pi_b, pi_c: all rejected) | killed (rejected against the other case has the same claim digest; used the own digest with bit 0 flipped: verification indicates proof is invalid) | not run (control `canonical` is not compiled into this harness (available: reference)) | killed (rejected before the boundary (bincode): io error: unexpected end of file) | 26.3 | 113.9 |
+| synthetic-loop-100k | reference | not run (the case carries no canonical output (synthetic or not captured)) | yes | not run (no canonical output to compare claims with) | killed (one bit flipped in each of pi_a, pi_b, pi_c: all rejected) | killed (rejected against no second case; used the own digest with bit 0 flipped: verification indicates proof is invalid) | not run (control `canonical` is not compiled into this harness (available: reference)) | killed (rejected before the boundary (bincode): io error: unexpected end of file) | 26.5 | 113.3 |
+
+Timings are this host's wall-clock: `derive s` = identity_p254 on the CPU (≈23.9 s) + circom witness generation (≈2.5 s); `prove s` = the CPU reference behind the boundary (≈113 s: zkey parse with on-curve checks, scatter of 29.1M coefficients, three coset transforms on 2^23, five Pippenger MSMs on 22 threads, assembly, JSON). They are reported for information, not as performance claims.
+
+**What the two cases establish.** On the real circuit, the reference arm's proof verifies under the unmodified upstream verifier (assertion 1) for two distinct stage inputs; corrupting any of π_A, π_B, π_C is rejected (assertion 4); verifying against a foreign statement is rejected (cross-claim arm — derived from the case's own claim digest, because both loop-guest runs are the same statement: the claim does not encode work); a truncated stage input is rejected before the boundary with its error class (malformed-input arm). **What they do not establish:** agreement with a production canonical output (needs the corpus, E1) and the `canonical answers` control (needs the CUDA backend, E2). Both cells say so.
+
+Oracle: risc0-groth16 3.0.3 (workspace at the milestone base tag v3.0.4) `Verifier` via risc0-zkvm 3.0.4 `Groth16Receipt::verify_integrity_with_context`.
 
 ### Frozen corpus (`corpus-groth16-s01-v1`)
 
