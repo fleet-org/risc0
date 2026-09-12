@@ -8,6 +8,10 @@ homepage = { workspace = true }
 repository = { workspace = true }
 publish = false
 
+[[bin]]
+name = "groth16-metal-kernel-check"
+path = "src/bin/kernel-check.rs"
+
 [dependencies]
 anyhow = "1.0"
 risc0-groth16-core = { path = "../groth16-core" }
