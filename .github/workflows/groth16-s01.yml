@@ -54,3 +54,14 @@ jobs:
         run: cargo check -p risc0-groth16-sys --features cuda --locked
       - name: Type-check for aarch64-apple-darwin (Metal arm target; no SDK needed for check)
         run: cargo check -p risc0-groth16-sys -p risc0-groth16-core --target aarch64-apple-darwin --locked
+
+  harness:
+    name: s01/5 harness compiles (CPU prover + reference arm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - name: Type-check the harness (pulls the CPU recursion prover; no artifacts needed to compile)
+        run: cargo check -p groth16-s01-harness --locked
