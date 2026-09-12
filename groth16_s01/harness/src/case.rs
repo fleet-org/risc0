@@ -36,6 +36,10 @@ pub struct Case {
     pub input_bytes: Vec<u8>,
     /// The canonical stage output, when the corpus carries one.
     pub canonical_output: Option<Receipt>,
+    /// Where `canonical_output` came from: `corpus` (production) or
+    /// `rehearsal:<kind>` (produced locally by that backend to exercise the
+    /// canonical code paths before the corpus exists). Reported verbatim.
+    pub canonical_provenance: Option<String>,
 }
 
 impl Case {
@@ -48,25 +52,63 @@ impl Case {
         let input_bytes = std::fs::read(dir.join("input.stark.bincode"))
             .with_context(|| format!("{}: input.stark.bincode", dir.display()))?;
         let input: Receipt = bincode::deserialize(&input_bytes).context("input receipt")?;
-        let canonical_output = [
+        let mut canonical_output = None;
+        let mut canonical_provenance = None;
+        for f in [
             "canonical.groth16.bincode",
             "canonical.blake3_groth16.bincode",
-        ]
-        .iter()
-        .map(|f| dir.join(f))
-        .find(|p| p.exists())
-        .map(|p| -> Result<Receipt> {
-            let b = std::fs::read(&p)?;
-            bincode::deserialize(&b).with_context(|| format!("{}", p.display()))
-        })
-        .transpose()?;
+        ] {
+            let p = dir.join(f);
+            if p.exists() {
+                let b = std::fs::read(&p)?;
+                canonical_output =
+                    Some(bincode::deserialize(&b).with_context(|| format!("{}", p.display()))?);
+                canonical_provenance = Some("corpus".to_string());
+                break;
+            }
+        }
+        if canonical_output.is_none() {
+            let rehearsal = std::fs::read_dir(dir)?
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("rehearsal.") && n.ends_with(".bincode"))
+                });
+            if let Some(p) = rehearsal {
+                let kind = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .trim_start_matches("rehearsal.")
+                    .trim_end_matches(".bincode")
+                    .to_string();
+                let b = std::fs::read(&p)?;
+                canonical_output =
+                    Some(bincode::deserialize(&b).with_context(|| format!("{}", p.display()))?);
+                canonical_provenance = Some(format!("rehearsal:{kind}"));
+            }
+        }
         Ok(Self {
             id,
             dir: dir.to_path_buf(),
             input,
             input_bytes,
             canonical_output,
+            canonical_provenance,
         })
+    }
+
+    /// Store a locally produced stage output as a REHEARSAL canonical for this case
+    /// (`rehearsal.<kind>.bincode`). It exercises the canonical code paths; the report
+    /// labels it, so it is never mistaken for a production output.
+    pub fn save_rehearsal(dir: &Path, kind: &str, output: &Receipt) -> Result<()> {
+        std::fs::write(
+            dir.join(format!("rehearsal.{kind}.bincode")),
+            bincode::serialize(output)?,
+        )?;
+        Ok(())
     }
 
     /// Write a synthetic case (no canonical output) to `dir`.

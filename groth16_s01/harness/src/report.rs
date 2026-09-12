@@ -27,6 +27,8 @@ pub struct Row {
     pub rewrite_kind: String,
     /// Assertion 3: the canonical output still verifies.
     pub canonical_verified: Tri,
+    /// Where the canonical output came from (`corpus` or `rehearsal:<kind>`), if any.
+    pub canonical_provenance: Option<String>,
     /// Assertion 1: the rewrite's output verifies.
     pub rewrite_verified: Tri,
     /// Assertion 2: the same public inputs (same claim digest) as the canonical output.
@@ -57,11 +59,15 @@ pub fn markdown(rows: &[Row]) -> String {
     out.push_str("| case | rewrite | canonical verifies (3) | rewrite verifies (1) | same public inputs (2) | bit-flip rejected (4) | cross-claim rejected | canonical answers | malformed input | derive s | prove s |\n");
     out.push_str("|---|---|---|---|---|---|---|---|---|---:|---:|\n");
     for r in rows {
+        let canonical_cell = match &r.canonical_provenance {
+            Some(p) if p != "corpus" => format!("{} [{}]", r.canonical_verified.cell(), p),
+            _ => r.canonical_verified.cell(),
+        };
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.1} | {:.1} |\n",
             r.case_id,
             r.rewrite_kind,
-            r.canonical_verified.cell(),
+            canonical_cell,
             r.rewrite_verified.cell(),
             r.public_inputs_equal.cell(),
             r.arms.bit_flip.cell(),

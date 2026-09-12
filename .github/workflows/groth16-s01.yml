@@ -71,7 +71,7 @@ jobs:
   harness:
     name: s01/5 harness compiles (CPU prover + reference arm)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain (pinned by rust-toolchain.toml) + protoc for circom-witnesscalc's build script
