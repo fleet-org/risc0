@@ -39,21 +39,7 @@ pub fn msm_naive<F: Field>(points: &[Affine<F>], scalars: &[Fr]) -> Jacobian<F> 
     acc
 }
 
-/// The `w`-bit digit `window` of a canonical scalar (little-endian limbs).
-#[inline]
-pub fn digit(scalar: &[u64; 4], window: u32, w: u32) -> u64 {
-    let bit = (window * w) as usize;
-    let limb = bit / 64;
-    if limb >= 4 {
-        return 0;
-    }
-    let shift = bit % 64;
-    let mut d = scalar[limb] >> shift;
-    if shift + (w as usize) > 64 && limb + 1 < 4 {
-        d |= scalar[limb + 1] << (64 - shift);
-    }
-    d & ((1u64 << w) - 1)
-}
+pub use crate::scalar::digit;
 
 /// `Σ kᵢ·Pᵢ` by the windowed bucket method with `w`-bit windows
 /// (`1 <= w <= 20`): per window, add every point to the bucket of its digit,

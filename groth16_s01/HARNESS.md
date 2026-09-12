@@ -52,6 +52,17 @@ Timings are this host's wall-clock: `derive s` = identity_p254 on the CPU (≈23
 
 Oracle: risc0-groth16 3.0.3 (workspace at the milestone base tag v3.0.4) `Verifier` via risc0-zkvm 3.0.4 `Groth16Receipt::verify_integrity_with_context`.
 
+### Synthetic cases, CUDA-arm kernel bodies on the host launcher (`oxide-cpu`), control = `reference` — MEASURED 2026-09-12
+
+Same host, artifacts and stage inputs as above. The rewrite is `risc0-groth16-oxide`'s kernel bodies — the code cuda-oxide compiles to PTX — run by the CPU launcher through the boundary (`BackendKind::OxideCpu`, a testing kind); the control is the reference. Peak memory 7.7 GB anonymous (11.4 GB with page cache) per run.
+
+| case | rewrite | canonical verifies (3) | rewrite verifies (1) | same public inputs (2) | bit-flip rejected (4) | cross-claim rejected | canonical answers | malformed input | derive s | prove s |
+|---|---|---|---|---|---|---|---|---|---:|---:|
+| synthetic-loop-0 | oxide-cpu | not run (the case carries no canonical output (synthetic or not captured)) | yes | not run (no canonical output to compare claims with) | killed (one bit flipped in each of pi_a, pi_b, pi_c: all rejected) | killed (rejected against no second case; used the own digest with bit 0 flipped: verification indicates proof is invalid) | killed (control `reference` answered and verified; registry reported `reference`; a registry without `oxide-cpu` refuses it) | killed (rejected before the boundary (bincode): io error: unexpected end of file) | 26.4 | 29.5 |
+| synthetic-loop-100k | oxide-cpu | not run (the case carries no canonical output (synthetic or not captured)) | yes | not run (no canonical output to compare claims with) | killed (one bit flipped in each of pi_a, pi_b, pi_c: all rejected) | killed (rejected against no second case; used the own digest with bit 0 flipped: verification indicates proof is invalid) | killed (control `reference` answered and verified; registry reported `reference`; a registry without `oxide-cpu` refuses it) | killed (rejected before the boundary (bincode): io error: unexpected end of file) | 26.3 | 29.4 |
+
+**What these two runs add.** The `canonical answers` arm now runs: with the rewrite disabled, the control (`reference`) answers, the oracle accepts it, the registry reports the control kind, and a registry without `oxide-cpu` refuses to select it — the harness cannot report a rewrite result that the control produced. The CUDA arm's kernels are therefore proven on the production circuit before any GPU executes them; on a CUDA host the only change is the launcher. Prove time is this host's wall-clock for information only.
+
 ### Frozen corpus (`corpus-groth16-s01-v1`)
 
 _pending — needs the corpus (E1 on #1)._

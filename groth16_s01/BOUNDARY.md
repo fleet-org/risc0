@@ -104,6 +104,7 @@ pub trait Groth16Backend {
 //   cuda-oxide  #[cfg(feature = "cuda-oxide")]                                 → Rust kernels (s01/4)
 //   metal       #[cfg(all(feature = "metal", target_os = "macos", target_arch = "aarch64"))] → MSL kernels (s01/4b)
 //   reference   #[cfg(feature = "reference")]                                  → risc0-groth16-core on the CPU (tests + harness control arm; never the default)
+//   oxide-cpu   #[cfg(feature = "oxide-cpu")]                                  → the CUDA arm's kernel bodies on the host launcher (tests; never the default)
 ```
 
 **Landed (C3, C4):** `risc0/groth16-sys/src/backend.rs` implements exactly this; `risc0/groth16-core` is the shared `no_std` crate (field · fp2 · ec · ntt · msm · zkey/wtns · prover) the arms build on, and `backend/reference.rs` runs its pipeline behind the boundary (DEF-G16-006). The reference is proven on the in-tree `multiplier2` fixture: its `proof.json` verifies under the unmodified `risc0-groth16` verifier, and an unsatisfied witness yields a proof that verifier rejects.

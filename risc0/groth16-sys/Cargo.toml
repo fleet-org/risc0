@@ -16,6 +16,7 @@ anyhow = "1.0.98"
 blst = { version = "0.3.15", optional = true }
 getrandom = { version = "0.2", optional = true }
 risc0-groth16-core = { path = "../groth16-core", optional = true }
+risc0-groth16-oxide = { path = "../groth16-oxide", optional = true }
 sppark = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -34,4 +35,7 @@ metal = []
 # CPU reference prover behind the same boundary: for tests and the differential harness,
 # never the default, not a production path (GROTH16 s01, DEF-G16-006).
 reference = ["dep:risc0-groth16-core", "dep:getrandom"]
+# The CUDA arm's kernel bodies run by the host launcher: proves the exact kernel code on a
+# CPU through the same boundary; a testing kind like `reference`, never the default.
+oxide-cpu = ["dep:risc0-groth16-oxide", "dep:risc0-groth16-core", "dep:getrandom"]
 setup = []

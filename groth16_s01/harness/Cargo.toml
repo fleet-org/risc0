@@ -20,7 +20,7 @@ hex = "0.4"
 risc0-binfmt = { workspace = true }
 risc0-groth16 = { workspace = true, features = ["prove"] }
 risc0-groth16-core = { path = "../../risc0/groth16-core" }
-risc0-groth16-sys = { workspace = true, features = ["reference"] }
+risc0-groth16-sys = { workspace = true, features = ["reference", "oxide-cpu"] }
 risc0-zkos-v1compat = { workspace = true }
 risc0-zkvm = { workspace = true, features = ["prove"] }
 serde = { version = "1.0", features = ["derive"] }

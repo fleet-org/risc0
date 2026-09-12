@@ -10,6 +10,18 @@ Base branch `integration/staging-platform` = upstream tag `v3.0.4` (`d7ee368e`),
 | [`BOUNDARY.md`](./BOUNDARY.md) | s01/2 · #3 | call graph, kernel inventory, the named boundary (`risc0_groth16_sys::prove`), data contract |
 | [`CORPUS.md`](./CORPUS.md) | s01/3 · #4 | capture recipe, coverage axes, manifest schema, freeze rules |
 
-Code lands under `risc0/groth16-sys/` (boundary trait + backends) and, later, `groth16_s01/harness/` (s01/5). Every issue reference is repo-qualified; every source link is a full-SHA permalink.
+| [`HARNESS.md`](./HARNESS.md) | s01/5 · #7 | the differential harness: oracle, assertions, mutation arms, measured results (`harness/`, `reports/`) |
 
-**Status:** C4 — `risc0/groth16-core` (shared `no_std` arithmetic, NTT, MSM, zkey/wtns formats, reference prover; every module conformance-tested against arkworks) and the `reference` backend in `risc0-groth16-sys`, verified end-to-end on the in-tree fixture. C3 — the boundary module `risc0/groth16-sys/src/backend.rs` (`Groth16Backend`, `BackendKind`, `Registry`, `RISC0_GROTH16_BACKEND`) with the canonical backend registered under `cuda`; CI in `.github/workflows/groth16-s01.yml`.
+Code map:
+
+| crate | role | proven by |
+|---|---|---|
+| `risc0/groth16-sys` | the boundary (`Groth16Backend`, `Registry`, `RISC0_GROTH16_BACKEND`) + backends: `canonical` (cuda), `reference`, `oxide-cpu` (testing kinds) | unit tests with mutation arms; `reference`/`oxide-cpu` outputs verified by the upstream verifier |
+| `risc0/groth16-core` | shared `no_std` arithmetic (Fp/Fr/Fp2, G1/G2), NTT, MSM, zkey/wtns formats, the prover pipeline and assembly, the arms' shared helpers | conformance vs arkworks; fixture proof verifies |
+| `risc0/groth16-oxide` | the CUDA arm's kernel bodies as plain Rust + a launcher seam (`CpuLauncher` proves them; the cuda-oxide `#[cuda_module]` launcher is the device one) | byte-identical proof to core for fixed blinding; real-circuit run through the harness as `oxide-cpu` |
+| `risc0/groth16-metal` | the Metal arm: MSL kernels mirroring the oxide bodies, host pipeline on `metal` 0.29, records packed from core types | record-layout tests; darwin type-check in CI; GPU execution needs a Mac (E3) |
+| `groth16_s01/harness` | s01/5 | run on the real circuit (see HARNESS.md) |
+
+Every issue reference is repo-qualified; every source link is a full-SHA permalink.
+
+**Status:** C6 — `risc0-groth16-oxide` (CUDA arm kernel bodies, CPU-proven) and `risc0-groth16-metal` (Metal arm, darwin type-checked) exist; C5 — the s01/5 harness ran the reference arm on the real circuit; C4 — `risc0/groth16-core` (shared `no_std` arithmetic, NTT, MSM, zkey/wtns formats, reference prover; every module conformance-tested against arkworks) and the `reference` backend in `risc0-groth16-sys`, verified end-to-end on the in-tree fixture. C3 — the boundary module `risc0/groth16-sys/src/backend.rs` (`Groth16Backend`, `BackendKind`, `Registry`, `RISC0_GROTH16_BACKEND`) with the canonical backend registered under `cuda`; CI in `.github/workflows/groth16-s01.yml`.

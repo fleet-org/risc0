@@ -18,6 +18,8 @@ members = [
   "risc0/core",
   "risc0/groth16",
   "risc0/groth16-core",
+  "risc0/groth16-metal",
+  "risc0/groth16-oxide",
   "risc0/groth16-sys",
   "risc0/povw",
   "risc0/povw/guests",

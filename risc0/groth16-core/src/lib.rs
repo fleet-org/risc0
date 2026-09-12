@@ -29,6 +29,9 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
 
+#[cfg(feature = "std")]
+pub mod artifacts;
+pub mod coeff;
 pub mod consts;
 pub mod ec;
 pub mod field;
@@ -38,5 +41,6 @@ pub mod msm;
 pub mod ntt;
 #[cfg(feature = "std")]
 pub mod prover;
+pub mod scalar;
 #[cfg(feature = "std")]
 pub mod zkey;

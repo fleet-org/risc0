@@ -136,6 +136,9 @@ pub fn canonical_answers(
         if *kind != rewrite {
             without = match *kind {
                 BackendKind::Reference => without.with(Box::new(reference_backend())),
+                BackendKind::OxideCpu => {
+                    without.with(Box::new(risc0_groth16_sys::backend::oxide_cpu::OxideCpu))
+                }
                 other => {
                     return Arm::NotRun(format!(
                         "cannot rebuild a registry with `{other}` in this harness"

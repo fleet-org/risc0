@@ -117,35 +117,204 @@ pub fn prove(zkey: &Zkey, witness: &[Fr], r: &Fr, s: &Fr) -> Result<Proof, Prove
     }
     let h_evals = quotient_on_coset(zkey, witness);
 
-    let pi_h: G1Jacobian = msm_pippenger(&zkey.h, &h_evals, WINDOW_BITS);
-    let pi_a: G1Jacobian = msm_pippenger(&zkey.a, witness, WINDOW_BITS);
-    let pi_b1: G1Jacobian = msm_pippenger(&zkey.b1, witness, WINDOW_BITS);
-    let pi_b2: G2Jacobian = msm_pippenger(&zkey.b2, witness, WINDOW_BITS);
-    let private = &witness[zkey.num_public + 1..];
-    let pi_c: G1Jacobian = msm_pippenger(&zkey.c, private, WINDOW_BITS);
+    let msms = Msms {
+        h: msm_pippenger(&zkey.h, &h_evals, WINDOW_BITS),
+        a: msm_pippenger(&zkey.a, witness, WINDOW_BITS),
+        b1: msm_pippenger(&zkey.b1, witness, WINDOW_BITS),
+        b2: msm_pippenger(&zkey.b2, witness, WINDOW_BITS),
+        c: msm_pippenger(&zkey.c, &witness[zkey.num_public + 1..], WINDOW_BITS),
+    };
+    Ok(assemble(zkey, &msms, r, s))
+}
 
+/// The five multi-scalar multiplications a Groth16 proof is assembled from.
+#[derive(Clone, Debug)]
+pub struct Msms {
+    /// `Σ q_i·H_i` over the quotient's coset evaluations.
+    pub h: G1Jacobian,
+    /// `Σ w_i·A_i`.
+    pub a: G1Jacobian,
+    /// `Σ w_i·B1_i` (G1).
+    pub b1: G1Jacobian,
+    /// `Σ w_i·B2_i` (G2).
+    pub b2: G2Jacobian,
+    /// `Σ_{i > num_public} w_i·C_i`.
+    pub c: G1Jacobian,
+}
+
+/// The host-side assembly the canonical kernels also do on the host: blind
+/// the five MSM results with `r`, `s` and the verifying key into `(π_A, π_B, π_C)`.
+/// Shared by every arm, so an arm implements only the MSMs and the quotient.
+pub fn assemble(zkey: &Zkey, msms: &Msms, r: &Fr, s: &Fr) -> Proof {
     let vk = &zkey.vk;
     let delta_g1 = vk.delta_g1.to_jacobian();
     // A = α + Σ wᵢ·Aᵢ + r·δ
-    let a = pi_a.add_affine(&vk.alpha_g1).add(&delta_g1.mul(r));
+    let a = msms.a.add_affine(&vk.alpha_g1).add(&delta_g1.mul(r));
     // B₂ = β₂ + Σ wᵢ·B2ᵢ + s·δ₂ ;  B₁ = β₁ + Σ wᵢ·B1ᵢ + s·δ₁
-    let b2 = pi_b2
+    let b2 = msms
+        .b2
         .add_affine(&vk.beta_g2)
         .add(&vk.delta_g2.to_jacobian().mul(s));
-    let b1 = pi_b1.add_affine(&vk.beta_g1).add(&delta_g1.mul(s));
+    let b1 = msms.b1.add_affine(&vk.beta_g1).add(&delta_g1.mul(s));
     // C = Σ_{i > ℓ} wᵢ·Cᵢ + π_h + s·A + r·B₁ − (r·s)·δ
     let rs = r.mul(s);
-    let c = pi_c
-        .add(&pi_h)
+    let c = msms
+        .c
+        .add(&msms.h)
         .add(&a.mul(s))
         .add(&b1.mul(r))
         .add(&delta_g1.mul(&rs).neg());
-
-    Ok(Proof {
+    Proof {
         a: a.to_affine(),
         b: b2.to_affine(),
         c: c.to_affine(),
-    })
+    }
+}
+
+pub use crate::coeff::GroupedCoeff;
+
+/// The A- and B-matrix coefficients regrouped by constraint, the layout a
+/// scatter kernel consumes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CoefficientGroups {
+    /// A-matrix coefficients in group order.
+    pub a: Vec<GroupedCoeff>,
+    /// Group start indices into `a` (one more than the number of groups).
+    pub a_starts: Vec<u32>,
+    /// The constraint index each A group writes to.
+    pub a_constraint: Vec<u32>,
+    /// B-matrix coefficients in group order.
+    pub b: Vec<GroupedCoeff>,
+    /// Group start indices into `b`.
+    pub b_starts: Vec<u32>,
+    /// The constraint index each B group writes to.
+    pub b_constraint: Vec<u32>,
+}
+
+impl CoefficientGroups {
+    /// Group a zkey's coefficient list (already ascending by constraint).
+    pub fn from_zkey(zkey: &Zkey) -> Self {
+        let mut out = Self {
+            a_starts: vec![0],
+            b_starts: vec![0],
+            ..Self::default()
+        };
+        for co in &zkey.coefficients {
+            let (list, starts, cons) = if co.matrix == 0 {
+                (&mut out.a, &mut out.a_starts, &mut out.a_constraint)
+            } else {
+                (&mut out.b, &mut out.b_starts, &mut out.b_constraint)
+            };
+            if cons.last() != Some(&co.constraint) {
+                if !cons.is_empty() {
+                    starts.push(list.len() as u32);
+                }
+                cons.push(co.constraint);
+            }
+            list.push(GroupedCoeff {
+                signal: co.signal,
+                value: co.value,
+            });
+        }
+        out.a_starts.push(out.a.len() as u32);
+        out.b_starts.push(out.b.len() as u32);
+        out
+    }
+}
+
+/// Tables the transforms need for a domain of size `n`.
+#[derive(Clone, Debug)]
+pub struct Tables {
+    /// `omega^j` for `j < n/2`, `omega` the primitive `n`-th root.
+    pub forward: Vec<Fr>,
+    /// `omega^-j` for `j < n/2`.
+    pub inverse: Vec<Fr>,
+    /// `shift^i` for `i < n`, `shift` the `2n`-th root the coset uses.
+    pub shift_powers: Vec<Fr>,
+    /// `1/n`.
+    pub n_inv: Fr,
+    /// `log2(n)`.
+    pub lg_n: u32,
+}
+
+impl Tables {
+    /// Build the tables for a power-of-two domain.
+    pub fn new(n: usize) -> Self {
+        let lg_n = lg2(n);
+        let omega = Fr::two_adic_root(lg_n);
+        let omega_inv = omega.inverse().expect("root of unity");
+        let shift = Fr::two_adic_root(lg_n + 1);
+        let powers = |base: Fr, count: usize| {
+            let mut out = Vec::with_capacity(count);
+            let mut p = Fr::ONE;
+            for _ in 0..count {
+                out.push(p);
+                p = p.mul(&base);
+            }
+            out
+        };
+        Self {
+            forward: powers(omega, n / 2),
+            inverse: powers(omega_inv, n / 2),
+            shift_powers: powers(shift, n),
+            n_inv: Fr::from_u64(n as u64).inverse().expect("n invertible"),
+            lg_n,
+        }
+    }
+}
+
+/// Host side of a windowed MSM: counting-sort point indices by digit so each
+/// bucket is a contiguous run. Returns `(order, starts)` with
+/// `starts.len() == buckets + 1`; digit 0 contributes nothing.
+pub fn counting_sort_by_digit(digits: &[u32], buckets: usize) -> (Vec<u32>, Vec<u32>) {
+    let mut counts = vec![0u32; buckets + 1];
+    for &d in digits {
+        if d != 0 {
+            counts[d as usize] += 1;
+        }
+    }
+    let mut starts = vec![0u32; buckets + 1];
+    for d in 1..=buckets {
+        starts[d] = starts[d - 1] + counts[d];
+    }
+    let mut fill = starts.clone();
+    let mut order = vec![0u32; starts[buckets] as usize];
+    for (i, &d) in digits.iter().enumerate() {
+        if d != 0 {
+            let slot = &mut fill[(d - 1) as usize];
+            order[*slot as usize] = i as u32;
+            *slot += 1;
+        }
+    }
+    (order, starts)
+}
+
+/// `Σ_d d·B_d` from the bucket sums by the running-sum reduction.
+pub fn reduce_buckets<F: crate::field::Field>(
+    sums: &[crate::ec::Jacobian<F>],
+) -> crate::ec::Jacobian<F> {
+    let mut running = crate::ec::Jacobian::INFINITY;
+    let mut total = crate::ec::Jacobian::INFINITY;
+    for s in sums.iter().rev() {
+        running = running.add(s);
+        total = total.add(&running);
+    }
+    total
+}
+
+/// Combine per-window sums by Horner's rule (`window_sums[0]` is the lowest window).
+pub fn horner<F: crate::field::Field>(
+    window_sums: &[crate::ec::Jacobian<F>],
+    w: u32,
+) -> crate::ec::Jacobian<F> {
+    let mut result = crate::ec::Jacobian::INFINITY;
+    for sum in window_sums.iter().rev() {
+        for _ in 0..w {
+            result = result.double();
+        }
+        result = result.add(sum);
+    }
+    result
 }
 
 /// Decimal rendering of a canonical 256-bit value (what snarkjs JSON carries).
