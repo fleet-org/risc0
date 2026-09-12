@@ -21,11 +21,12 @@
 
 use anyhow::{anyhow, Context as _};
 use risc0_groth16_core::{
-    prover::{proof_json, public_json},
+    prover::{proof_json, public_json, CoefficientGroups},
     zkey::{parse_witness_values, Zkey},
 };
+use risc0_groth16_metal::device::{MetalProver, ResidentZkey};
 
-use super::{reference::random_scalar, BackendKind, Groth16Backend};
+use super::{reference::random_scalar, resident, BackendKind, Groth16Backend};
 use crate::{ProverParams, SetupParams};
 
 /// The Metal arm.
@@ -37,21 +38,36 @@ impl Groth16Backend for Metal {
     }
 
     fn prove(&self, prover: &ProverParams, setup: &SetupParams) -> anyhow::Result<()> {
-        let zkey = {
-            let zkey_bytes = std::fs::read(setup.srs_path.as_path())
-                .with_context(|| format!("reading zkey {}", setup.srs_path.as_path().display()))?;
-            Zkey::parse(&zkey_bytes).context("parsing zkey")?
+        let path = setup.srs_path.as_path();
+        let prepare = || -> anyhow::Result<Prepared> {
+            let mut zkey = {
+                let zkey_bytes = std::fs::read(path)
+                    .with_context(|| format!("reading zkey {}", path.display()))?;
+                Zkey::parse(&zkey_bytes).context("parsing zkey")?
+            };
+            let groups = CoefficientGroups::from_zkey(&zkey);
+            zkey.coefficients = Vec::new();
+            let device = MetalProver::new()?;
+            let resident = device.prepare(&zkey, &groups);
+            Ok(Prepared { device, resident })
         };
-        let witness_bytes =
-            unsafe { std::slice::from_raw_parts(prover.witness, zkey.num_vars * 32) };
+        let p = if resident::enabled() {
+            CACHE.get_or_prepare(resident::Key::of(path)?, prepare)?
+        } else {
+            std::sync::Arc::new(prepare()?)
+        };
+        let (num_vars, num_public) = (p.resident.num_vars(), p.resident.num_public());
+        let witness_bytes = unsafe { std::slice::from_raw_parts(prover.witness, num_vars * 32) };
         let witness = parse_witness_values(witness_bytes)
             .map_err(|i| anyhow!("witness value {i} is not a field element"))?;
         let (r, s) = (random_scalar()?, random_scalar()?);
-        let proof =
-            risc0_groth16_metal::device::prove(&zkey, &witness, &r, &s).context("metal prover")?;
+        let proof = p
+            .device
+            .prove_resident(&p.resident, &witness, &r, &s)
+            .context("metal prover")?;
         std::fs::write(
             prover.public_path.as_path(),
-            public_json(&witness, zkey.num_public),
+            public_json(&witness, num_public),
         )
         .context("writing public.json")?;
         std::fs::write(prover.proof_path.as_path(), proof_json(&proof))
@@ -59,3 +75,11 @@ impl Groth16Backend for Metal {
         Ok(())
     }
 }
+
+/// The device, its pipelines, and the zkey resident on it.
+struct Prepared {
+    device: MetalProver,
+    resident: ResidentZkey,
+}
+
+static CACHE: resident::Cache<Prepared> = resident::Cache::new();

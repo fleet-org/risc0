@@ -279,6 +279,9 @@ pub mod reference;
 #[cfg(feature = "oxide-cpu")]
 pub mod oxide_cpu;
 
+#[cfg(any(feature = "cuda-oxide", feature = "metal"))]
+pub mod resident;
+
 #[cfg(feature = "cuda-oxide")]
 pub mod cuda_oxide;
 
