@@ -1,0 +1,38 @@
+// A host-side <metal_stdlib> for the Groth16 shaders: enough of Metal Shading Language to compile
+// consts.metal + kernels.metal as C++14 on any machine and RUN them per index (the `msl-host`
+// backend of risc0-groth16-metal), and to syntax-check them (groth16_s01/scripts/msl-check.sh).
+// Only what the shaders use: the integer type names, three intrinsics with their MSL semantics,
+// the address-space and function-kind words as no-ops. Not a model of Metal: what a Mac's compiler
+// does with the same source is what the Mac run checks.
+#pragma once
+#include <cstdint>
+// MSL's integer type names are built in (usable before any include), so they live at global scope.
+typedef unsigned int uint;
+typedef unsigned long ulong;
+typedef unsigned short ushort;
+typedef unsigned char uchar;
+static_assert(sizeof(uint) == 4 && sizeof(ulong) == 8 && sizeof(long) == 8 && sizeof(int) == 4,
+              "MSL widths: uint 32, ulong 64, long 64, int 32");
+namespace metal {
+// high 32 bits of the 64-bit product (MSL `mulhi`)
+inline uint mulhi(uint a, uint b) { return (uint)(((ulong)a * (ulong)b) >> 32); }
+inline ulong mulhi(ulong a, ulong b) { return (ulong)(((unsigned __int128)a * (unsigned __int128)b) >> 64); }
+// bit reversal of the 32-bit word (MSL `reverse_bits`)
+inline uint reverse_bits(uint x) {
+    x = ((x >> 1) & 0x55555555u) | ((x & 0x55555555u) << 1);
+    x = ((x >> 2) & 0x33333333u) | ((x & 0x33333333u) << 2);
+    x = ((x >> 4) & 0x0F0F0F0Fu) | ((x & 0x0F0F0F0Fu) << 4);
+    x = ((x >> 8) & 0x00FF00FFu) | ((x & 0x00FF00FFu) << 8);
+    return (x >> 16) | (x << 16);
+}
+// MSL `select(a, b, c)`: c ? b : a
+template <typename T> inline T select(T a, T b, bool c) { return c ? b : a; }
+} // namespace metal
+#define kernel
+#define device
+#define constant const // a `constant T&` parameter is read-only; a `constant` global is a constant
+#define thread
+#define threadgroup
+// MSL built-in scalar type names the shaders never use as types: any use is an error here, so a
+// variable named after one (the `half` that would have failed the first Mac run) fails on Linux.
+#pragma GCC poison half float double char short quad packed_float2 packed_float3 packed_float4

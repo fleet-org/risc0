@@ -201,6 +201,15 @@ to PTX on the pinned cuda-oxide toolchain on the session box (`cargo oxide build
 against the ABI and assembles the module with `ptxas` for both targets. MEASURED. The `ptx-c13`
 release carries the two PTX files. What remains for the CUDA host is the launches.
 
+**Landed (C14, the Metal shaders run on the CPU):** the Metal prover's pipeline is generic over a
+`Backend` — `MetalBackend` (macOS: the Metal compiler and device) or `HostBackend` (every other
+target: the SAME shader source compiled as C++ by the crate's build script against a stub
+`<metal_stdlib>` with the intrinsics implemented, run one thread index at a time).
+`cargo test -p risc0-groth16-metal` on Linux runs every kernel, both MSMs and a fixture proof
+through the shaders and compares with the Rust bodies and the core prover — MEASURED green. What the
+Mac still has to show is the Metal compiler and the device themselves; the shaders' arithmetic,
+layouts and orchestration are verified here.
+
 Constraints this satisfies: the canonical path stays selectable on every build that has it
 (definition of done #2); selecting an unavailable backend is an error, never a silent fallback
 (three-state: _unavailable_ ≠ _failed_ ≠ _succeeded_); the harness (s01/5) runs canonical and

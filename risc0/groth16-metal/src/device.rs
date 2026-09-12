@@ -12,19 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The host pipeline on a Metal device (macOS 13+, Apple Silicon): the
-//! canonical kernel sequence dispatched over the kernels of `kernels.metal`,
-//! with the sort, reduction and assembly on the host from
-//! `risc0-groth16-core`. Written against `metal` 0.29, the crate the
-//! in-tree `risc0-zkp` Metal HAL uses.
+//! The host pipeline over the kernels of `kernels.metal`: the canonical
+//! kernel sequence dispatched by name, with the sort, reduction and assembly
+//! on the host from `risc0-groth16-core`. The pipeline is generic over a
+//! [`Backend`] — where the shaders run:
+//!
+//! - [`MetalBackend`] (macOS 13+, Apple Silicon): the shaders compiled by the
+//!   Metal compiler at start-up, dispatched on the system default device
+//!   through `metal` 0.29, the crate the in-tree `risc0-zkp` Metal HAL uses.
+//! - [`HostBackend`] (every other target): the SAME shader source compiled as
+//!   C++ by the build script (`msl-host/`) and run one thread index at a
+//!   time on the CPU — the Metal arm's `oxide-cpu`. It proves the shaders'
+//!   arithmetic, layouts and kernels, and the whole pipeline down to a
+//!   fixture proof, where there is no Metal device; what it cannot prove is
+//!   the Metal compiler and the device themselves.
+//!
+//! One orchestration, two executors: a divergence between the two is a
+//! difference in the backend, never in the pipeline.
 
-use std::collections::HashMap;
-
-use anyhow::{anyhow, Context as _, Result};
-use metal::{
-    Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, Library,
-    MTLLanguageVersion, MTLResourceOptions, MTLSize,
-};
+use anyhow::Result;
 use risc0_groth16_core::{
     ec::Jacobian,
     field::{Field, Fr},
@@ -32,12 +38,13 @@ use risc0_groth16_core::{
     prover::{assemble, horner, CoefficientGroups, Msms, Proof, ProveError, Tables},
     zkey::Zkey,
 };
-
+pub use risc0_groth16_oxide::check::KernelCheck;
 use risc0_groth16_oxide::pipeline::{reduce_all_windows, sort_all_windows};
 
-use crate::{pack, MSL_SOURCE, WINDOW_BITS};
+use crate::{pack, WINDOW_BITS};
 
-const KERNELS: &[&str] = &[
+/// Every kernel of `kernels.metal`, by name.
+pub const KERNELS: &[&str] = &[
     "scatter_group",
     "pointwise_mul",
     "pointwise_mul_sub",
@@ -50,112 +57,88 @@ const KERNELS: &[&str] = &[
     "bucket_sum_g2",
 ];
 
-/// A device, its command queue, and the compiled kernels.
-pub struct MetalProver {
-    device: Device,
-    queue: CommandQueue,
-    _library: Library,
-    pipelines: HashMap<&'static str, ComputePipelineState>,
-}
-
-/// The transform tables uploaded once per proof.
-/// What the coset transform needs besides its two buffers.
-struct CosetTables<'a> {
-    n_inv: &'a [u8; 32],
-    lg_n: u32,
-    tb: &'a TransformBuffers,
-}
-
-struct TransformBuffers {
-    forward: Buffer,
-    inverse: Buffer,
-    shift: Buffer,
-}
-
-/// One kernel argument: a buffer or a small constant passed by value.
-#[derive(Clone, Copy)]
-enum Arg<'a> {
-    Buf(&'a Buffer),
+/// One kernel argument, in `[[buffer(i)]]` order: a buffer, or a small
+/// constant passed by value.
+pub enum Arg<'a, T> {
+    /// A device buffer.
+    Buf(&'a T),
+    /// Bytes passed by value (a `constant T&` parameter).
     Bytes(&'a [u8]),
 }
 
-impl MetalProver {
-    /// Open the system default device and compile the shader source.
-    pub fn new() -> Result<Self> {
-        let device = Device::system_default().ok_or_else(|| anyhow!("no Metal device"))?;
-        let options = CompileOptions::new();
-        options.set_language_version(MTLLanguageVersion::V3_0);
-        let library = device
-            .new_library_with_source(MSL_SOURCE, &options)
-            .map_err(|e| anyhow!("compiling the Groth16 kernels: {e}"))?;
-        let mut pipelines = HashMap::new();
-        for name in KERNELS {
-            let f = library
-                .get_function(name, None)
-                .map_err(|e| anyhow!("kernel {name}: {e}"))?;
-            let p = device
-                .new_compute_pipeline_state_with_function(&f)
-                .map_err(|e| anyhow!("pipeline {name}: {e}"))?;
-            pipelines.insert(*name, p);
-        }
-        let queue = device.new_command_queue();
-        Ok(Self {
-            device,
-            queue,
-            _library: library,
-            pipelines,
-        })
+// By hand: a derive would demand `T: Clone`, and the buffers are not clonable — the argument is
+// two references either way.
+impl<T> Clone for Arg<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Arg<'_, T> {}
+
+/// Where the shaders run.
+pub trait Backend {
+    /// A buffer the shaders read and write.
+    type Buf;
+    /// A buffer holding `bytes`.
+    fn upload(&self, bytes: &[u8]) -> Self::Buf;
+    /// A zeroed buffer of `bytes` bytes.
+    fn alloc(&self, bytes: usize) -> Self::Buf;
+    /// The first `bytes` bytes of `buf`, after every previous `run` completed.
+    fn read(&self, buf: &Self::Buf, bytes: usize) -> Vec<u8>;
+    /// Bytes held by `buf`.
+    fn len(&self, buf: &Self::Buf) -> usize;
+    /// Run `kernel` over `n` thread indices with `args` in `[[buffer(i)]]`
+    /// order, and wait.
+    fn run(&self, kernel: &str, n: usize, args: &[Arg<'_, Self::Buf>]);
+    /// The device, for reports.
+    fn describe(&self) -> String;
+}
+
+/// The prover pipeline over a backend.
+pub struct Prover<B: Backend> {
+    backend: B,
+}
+
+/// The transform tables on the device.
+struct TransformBuffers<T> {
+    forward: T,
+    inverse: T,
+    shift: T,
+}
+
+/// What the coset transform needs besides its two buffers.
+struct CosetTables<'a, T> {
+    n_inv: &'a [u8; 32],
+    lg_n: u32,
+    tb: &'a TransformBuffers<T>,
+}
+
+impl<B: Backend> Prover<B> {
+    /// A prover over `backend`.
+    pub fn with_backend(backend: B) -> Self {
+        Self { backend }
     }
 
-    fn upload(&self, bytes: &[u8]) -> Buffer {
-        let len = bytes.len().max(16) as u64;
-        let buf = self
-            .device
-            .new_buffer(len, MTLResourceOptions::StorageModeShared);
-        if !bytes.is_empty() {
-            // SAFETY: the buffer has at least `bytes.len()` bytes and is CPU-visible (shared storage).
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(),
-                    buf.contents() as *mut u8,
-                    bytes.len(),
-                )
-            };
-        }
-        buf
+    /// The backend.
+    pub fn backend(&self) -> &B {
+        &self.backend
     }
 
-    fn alloc(&self, bytes: usize) -> Buffer {
-        self.device
-            .new_buffer(bytes.max(16) as u64, MTLResourceOptions::StorageModeShared)
+    fn upload(&self, bytes: &[u8]) -> B::Buf {
+        self.backend.upload(bytes)
     }
 
-    fn read(&self, buf: &Buffer, bytes: usize) -> Vec<u8> {
-        let mut out = vec![0u8; bytes];
-        // SAFETY: shared-storage buffer of at least `bytes` bytes, written by completed command buffers.
-        unsafe {
-            std::ptr::copy_nonoverlapping(buf.contents() as *const u8, out.as_mut_ptr(), bytes)
-        };
-        out
+    fn alloc(&self, bytes: usize) -> B::Buf {
+        self.backend.alloc(bytes)
     }
 
-    /// Dispatch `kernel` over `n` threads with the given arguments, in order, and wait.
-    fn run(&self, kernel: &str, n: usize, args: &[Arg<'_>]) {
-        let pipeline = &self.pipelines[kernel];
-        let cmd = self.queue.new_command_buffer();
-        let enc = cmd.new_compute_command_encoder();
-        enc.set_compute_pipeline_state(pipeline);
-        for (i, a) in args.iter().enumerate() {
-            match a {
-                Arg::Buf(b) => enc.set_buffer(i as u64, Some(b), 0),
-                Arg::Bytes(b) => enc.set_bytes(i as u64, b.len() as u64, b.as_ptr() as *const _),
-            }
-        }
-        let width = pipeline.max_total_threads_per_threadgroup().min(256);
-        enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(width, 1, 1));
-        enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+    fn read(&self, buf: &B::Buf, bytes: usize) -> Vec<u8> {
+        self.backend.read(buf, bytes)
+    }
+
+    fn run(&self, kernel: &str, n: usize, args: &[Arg<'_, B::Buf>]) {
+        self.backend.run(kernel, n, args)
     }
 
     /// The coset transform, executing [`risc0_groth16_oxide::schedule::coset`]
@@ -163,13 +146,13 @@ impl MetalProver {
     /// and writes, and the one holding the result.
     fn h_to_coset<'b>(
         &self,
-        a: &'b Buffer,
-        b: &'b Buffer,
+        a: &'b B::Buf,
+        b: &'b B::Buf,
         n: usize,
-        coset: &CosetTables<'_>,
-    ) -> &'b Buffer {
-        let tb = coset.tb;
+        coset: &CosetTables<'_, B::Buf>,
+    ) -> &'b B::Buf {
         use risc0_groth16_oxide::schedule::{Buf, Step, Twiddles};
+        let tb = coset.tb;
         let pick = |which: Buf| match which {
             Buf::A => a,
             Buf::B => b,
@@ -229,7 +212,7 @@ impl MetalProver {
     fn msm<F: Field>(
         &self,
         kernel: &str,
-        points: &Buffer,
+        points: &B::Buf,
         n_points: usize,
         point_bytes: usize,
         scalars: &[Fr],
@@ -240,7 +223,6 @@ impl MetalProver {
         let w = WINDOW_BITS;
         let buckets = (1usize << w) - 1;
         let windows = 256u32.div_ceil(w) as usize;
-        let u32s = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>();
         let canonical = self.upload(&pack::pack_canonical(scalars));
         let digits_b = self.alloc(windows * n * 4);
         self.run(
@@ -294,10 +276,9 @@ impl MetalProver {
     /// — once, and keep it on the device (DEF-G16-014). With unified memory
     /// the buffers are the zkey's only copy the GPU needs; per-proof traffic
     /// drops to the witness in and the proof out.
-    pub fn prepare(&self, zkey: &Zkey, groups: &CoefficientGroups) -> ResidentZkey {
+    pub fn prepare(&self, zkey: &Zkey, groups: &CoefficientGroups) -> ResidentZkey<B> {
         let n = zkey.domain_size;
         let t = Tables::new(n);
-        let u32s = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>();
         ResidentZkey {
             meta: strip(zkey),
             a_constraint: groups.a_constraint.clone(),
@@ -328,11 +309,32 @@ impl MetalProver {
         }
     }
 
+    /// Bytes a resident zkey holds on the device.
+    pub fn resident_bytes(&self, z: &ResidentZkey<B>) -> usize {
+        [
+            &z.ca,
+            &z.sa,
+            &z.cb,
+            &z.sb,
+            &z.tb.forward,
+            &z.tb.inverse,
+            &z.tb.shift,
+            &z.pa,
+            &z.pb1,
+            &z.pc,
+            &z.ph,
+            &z.pb2,
+        ]
+        .iter()
+        .map(|b| self.backend.len(b))
+        .sum()
+    }
+
     /// Produce a proof against a resident zkey: the witness goes up, the
     /// proof comes back; nothing of the zkey moves.
     pub fn prove_resident(
         &self,
-        z: &ResidentZkey,
+        z: &ResidentZkey<B>,
         witness: &[Fr],
         r: &Fr,
         s: &Fr,
@@ -351,7 +353,7 @@ impl MetalProver {
         let n = zkey.domain_size;
         let witness_b = self.upload(&pack::pack_fr(witness));
         // scatter A and B (group sums), placed at their constraint indices on the host
-        let scatter = |cb: &Buffer, sb: &Buffer, cons: &[u32]| -> Vec<u8> {
+        let scatter = |cb: &B::Buf, sb: &B::Buf, cons: &[u32]| -> Vec<u8> {
             let out = self.alloc(cons.len() * 32);
             self.run(
                 "scatter_group",
@@ -397,24 +399,20 @@ impl MetalProver {
         let quotient = pack::unpack_fr(&self.read(&q, n * 32));
         let [na, nb1, nc, nh, nb2] = z.counts;
         let private = &witness[zkey.num_public + 1..];
+        let g1 = |points, count, scalars: &[Fr]| {
+            self.msm(
+                "bucket_sum_g1",
+                points,
+                count,
+                64,
+                scalars,
+                pack::unpack_jac_g1,
+            )
+        };
         let msms = Msms {
-            h: self.msm(
-                "bucket_sum_g1",
-                &z.ph,
-                nh,
-                64,
-                &quotient,
-                pack::unpack_jac_g1,
-            ),
-            a: self.msm("bucket_sum_g1", &z.pa, na, 64, witness, pack::unpack_jac_g1),
-            b1: self.msm(
-                "bucket_sum_g1",
-                &z.pb1,
-                nb1,
-                64,
-                witness,
-                pack::unpack_jac_g1,
-            ),
+            h: g1(&z.ph, nh, &quotient),
+            a: g1(&z.pa, na, witness),
+            b1: g1(&z.pb1, nb1, witness),
             b2: self.msm::<Fp2>(
                 "bucket_sum_g2",
                 &z.pb2,
@@ -423,100 +421,16 @@ impl MetalProver {
                 witness,
                 pack::unpack_jac_g2,
             ),
-            c: self.msm("bucket_sum_g1", &z.pc, nc, 64, private, pack::unpack_jac_g1),
+            c: g1(&z.pc, nc, private),
         };
         Ok(assemble(zkey, &msms, r, s))
     }
-}
 
-/// A zkey uploaded once and kept on the device across proofs: the five point
-/// sets (packed), the grouped coefficients with their group starts, the NTT
-/// tables. The host keeps only what assembly and the scatter placement need.
-pub struct ResidentZkey {
-    /// Sizes and the verifying key; every point vector empty.
-    meta: Zkey,
-    a_constraint: Vec<u32>,
-    b_constraint: Vec<u32>,
-    ca: Buffer,
-    sa: Buffer,
-    cb: Buffer,
-    sb: Buffer,
-    n_inv: [u8; 32],
-    lg_n: u32,
-    tb: TransformBuffers,
-    pa: Buffer,
-    pb1: Buffer,
-    pc: Buffer,
-    ph: Buffer,
-    pb2: Buffer,
-    /// Point counts of `a, b1, c, h, b2` (the MSM asserts them against the scalars).
-    counts: [usize; 5],
-}
-
-impl ResidentZkey {
-    /// Bytes held on the device.
-    pub fn device_bytes(&self) -> usize {
-        [
-            &self.ca,
-            &self.sa,
-            &self.cb,
-            &self.sb,
-            &self.tb.forward,
-            &self.tb.inverse,
-            &self.tb.shift,
-            &self.pa,
-            &self.pb1,
-            &self.pc,
-            &self.ph,
-            &self.pb2,
-        ]
-        .iter()
-        .map(|b| b.length() as usize)
-        .sum()
-    }
-
-    /// The circuit's variable count.
-    pub fn num_vars(&self) -> usize {
-        self.meta.num_vars
-    }
-
-    /// The circuit's public input count.
-    pub fn num_public(&self) -> usize {
-        self.meta.num_public
-    }
-}
-
-/// The zkey without its point and coefficient vectors: what `assemble` and
-/// the size checks read.
-fn strip(zkey: &Zkey) -> Zkey {
-    Zkey {
-        num_vars: zkey.num_vars,
-        num_public: zkey.num_public,
-        domain_size: zkey.domain_size,
-        vk: zkey.vk.clone(),
-        ic: zkey.ic.clone(),
-        coefficients: Vec::new(),
-        a: Vec::new(),
-        b1: Vec::new(),
-        b2: Vec::new(),
-        c: Vec::new(),
-        h: Vec::new(),
-    }
-}
-
-impl std::fmt::Debug for MetalProver {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MetalProver({})", self.device.name())
-    }
-}
-
-pub use risc0_groth16_oxide::check::KernelCheck;
-
-impl MetalProver {
-    /// Run every kernel, the MSM and a fixture proof on the device against
-    /// the shared cases (`risc0_groth16_oxide::check`) — the first thing to
-    /// run on a Mac, before any proof: it localises an MSL arithmetic, layout
-    /// or orchestration bug to one kernel or one composite step.
+    /// Run every kernel, the MSM and a fixture proof against the shared cases
+    /// (`risc0_groth16_oxide::check`) — the first thing to run on a Mac, and
+    /// what `cargo test` runs on the CPU everywhere else: it localises a
+    /// shader arithmetic, layout or orchestration bug to one kernel or one
+    /// composite step.
     pub fn kernel_check(&self) -> Result<Vec<KernelCheck>> {
         use risc0_groth16_oxide::check::{
             first_diff, first_point_diff, proof_diff, Cases, Fixture, WINDOWS,
@@ -524,10 +438,9 @@ impl MetalProver {
         let c = Cases::new();
         let n = c.n;
         let mut out = Vec::new();
-        let u32s = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>();
-        let fr_out = |kernel: &'static str, len: usize, args: &[Arg<'_>], want: &[Fr]| {
+        let fr_out = |kernel: &'static str, len: usize, args: &[Arg<'_, B::Buf>], want: &[Fr]| {
             let o = self.alloc(len * 32);
-            let mut a: Vec<Arg<'_>> = args.to_vec();
+            let mut a: Vec<Arg<'_, B::Buf>> = args.to_vec();
             a.push(Arg::Buf(&o));
             self.run(kernel, len, &a);
             KernelCheck::from_detail(
@@ -608,12 +521,7 @@ impl MetalProver {
                         Arg::Buf(&db),
                     ],
                 );
-                let got: Vec<u32> = self
-                    .read(&db, n * 4)
-                    .chunks_exact(4)
-                    .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-                    .collect();
-                if got != c.digits(window) {
+                if u32s_from(&self.read(&db, n * 4)) != c.digits(window) {
                     bad.push(window);
                 }
             }
@@ -625,9 +533,6 @@ impl MetalProver {
                     format!("windows {bad:?} differ")
                 },
             ));
-        }
-        {
-            let canonical = self.upload(&pack::pack_canonical(&c.wide));
             let total = WINDOWS as usize * n;
             let db = self.alloc(total * 4);
             self.run(
@@ -636,18 +541,13 @@ impl MetalProver {
                 &[
                     Arg::Buf(&canonical),
                     Arg::Bytes(&(n as u32).to_le_bytes()),
-                    Arg::Bytes(&WINDOW_BITS.to_le_bytes()),
+                    Arg::Bytes(&w),
                     Arg::Buf(&db),
                 ],
             );
-            let got: Vec<u32> = self
-                .read(&db, total * 4)
-                .chunks_exact(4)
-                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-                .collect();
             out.push(KernelCheck::from_detail(
                 "digits_all",
-                first_diff(&got, &c.digits_all()),
+                first_diff(&u32s_from(&self.read(&db, total * 4)), &c.digits_all()),
             ));
         }
         // bucket sums on G1 and G2: infinity input, empty bucket, P + (−P), P + P
@@ -724,9 +624,331 @@ impl MetalProver {
     }
 }
 
-/// A convenience: prove once on the default device.
+impl<B: Backend> std::fmt::Debug for Prover<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Prover({})", self.backend.describe())
+    }
+}
+
+/// A zkey uploaded once and kept on the device across proofs: the five point
+/// sets (packed), the grouped coefficients with their group starts, the NTT
+/// tables. The host keeps only what assembly and the scatter placement need.
+pub struct ResidentZkey<B: Backend> {
+    /// Sizes and the verifying key; every point vector empty.
+    meta: Zkey,
+    a_constraint: Vec<u32>,
+    b_constraint: Vec<u32>,
+    ca: B::Buf,
+    sa: B::Buf,
+    cb: B::Buf,
+    sb: B::Buf,
+    n_inv: [u8; 32],
+    lg_n: u32,
+    tb: TransformBuffers<B::Buf>,
+    pa: B::Buf,
+    pb1: B::Buf,
+    pc: B::Buf,
+    ph: B::Buf,
+    pb2: B::Buf,
+    /// Point counts of `a, b1, c, h, b2` (the MSM asserts them against the scalars).
+    counts: [usize; 5],
+}
+
+impl<B: Backend> ResidentZkey<B> {
+    /// The circuit's variable count.
+    pub fn num_vars(&self) -> usize {
+        self.meta.num_vars
+    }
+
+    /// The circuit's public input count.
+    pub fn num_public(&self) -> usize {
+        self.meta.num_public
+    }
+}
+
+/// The zkey without its point and coefficient vectors: what `assemble` and
+/// the size checks read.
+fn strip(zkey: &Zkey) -> Zkey {
+    Zkey {
+        num_vars: zkey.num_vars,
+        num_public: zkey.num_public,
+        domain_size: zkey.domain_size,
+        vk: zkey.vk.clone(),
+        ic: zkey.ic.clone(),
+        coefficients: Vec::new(),
+        a: Vec::new(),
+        b1: Vec::new(),
+        b2: Vec::new(),
+        c: Vec::new(),
+        h: Vec::new(),
+    }
+}
+
+fn u32s(v: &[u32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+fn u32s_from(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
+// ---- the Metal device ----------------------------------------------------------------------
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod metal_backend {
+    use std::collections::HashMap;
+
+    use anyhow::{anyhow, Result};
+    use metal::{
+        Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, Library,
+        MTLLanguageVersion, MTLResourceOptions, MTLSize,
+    };
+
+    use super::{Arg, Backend, Prover, KERNELS};
+    use crate::MSL_SOURCE;
+
+    /// A Metal device, its command queue, and the compiled kernels.
+    pub struct MetalBackend {
+        device: Device,
+        queue: CommandQueue,
+        _library: Library,
+        pipelines: HashMap<&'static str, ComputePipelineState>,
+    }
+
+    impl MetalBackend {
+        /// Open the system default device and compile the shader source.
+        pub fn new() -> Result<Self> {
+            let device = Device::system_default().ok_or_else(|| anyhow!("no Metal device"))?;
+            let options = CompileOptions::new();
+            options.set_language_version(MTLLanguageVersion::V3_0);
+            let library = device
+                .new_library_with_source(MSL_SOURCE, &options)
+                .map_err(|e| anyhow!("compiling the Groth16 kernels: {e}"))?;
+            let mut pipelines = HashMap::new();
+            for name in KERNELS {
+                let f = library
+                    .get_function(name, None)
+                    .map_err(|e| anyhow!("kernel {name}: {e}"))?;
+                let p = device
+                    .new_compute_pipeline_state_with_function(&f)
+                    .map_err(|e| anyhow!("pipeline {name}: {e}"))?;
+                pipelines.insert(*name, p);
+            }
+            let queue = device.new_command_queue();
+            Ok(Self {
+                device,
+                queue,
+                _library: library,
+                pipelines,
+            })
+        }
+    }
+
+    impl Backend for MetalBackend {
+        type Buf = Buffer;
+
+        fn upload(&self, bytes: &[u8]) -> Buffer {
+            let len = bytes.len().max(16) as u64;
+            let buf = self
+                .device
+                .new_buffer(len, MTLResourceOptions::StorageModeShared);
+            if !bytes.is_empty() {
+                // SAFETY: the buffer has at least `bytes.len()` bytes and is CPU-visible.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        buf.contents() as *mut u8,
+                        bytes.len(),
+                    )
+                };
+            }
+            buf
+        }
+
+        fn alloc(&self, bytes: usize) -> Buffer {
+            self.device
+                .new_buffer(bytes.max(16) as u64, MTLResourceOptions::StorageModeShared)
+        }
+
+        fn read(&self, buf: &Buffer, bytes: usize) -> Vec<u8> {
+            let mut out = vec![0u8; bytes];
+            // SAFETY: shared-storage buffer of at least `bytes` bytes, written by completed
+            // command buffers.
+            unsafe {
+                std::ptr::copy_nonoverlapping(buf.contents() as *const u8, out.as_mut_ptr(), bytes)
+            };
+            out
+        }
+
+        fn len(&self, buf: &Buffer) -> usize {
+            buf.length() as usize
+        }
+
+        /// Dispatch `kernel` over `n` threads with the arguments, in order, and wait.
+        fn run(&self, kernel: &str, n: usize, args: &[Arg<'_, Buffer>]) {
+            let pipeline = &self.pipelines[kernel];
+            let cmd = self.queue.new_command_buffer();
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(pipeline);
+            for (i, a) in args.iter().enumerate() {
+                match a {
+                    Arg::Buf(b) => enc.set_buffer(i as u64, Some(b), 0),
+                    Arg::Bytes(b) => {
+                        enc.set_bytes(i as u64, b.len() as u64, b.as_ptr() as *const _)
+                    }
+                }
+            }
+            let width = pipeline.max_total_threads_per_threadgroup().min(256);
+            enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(width, 1, 1));
+            enc.end_encoding();
+            cmd.commit();
+            cmd.wait_until_completed();
+        }
+
+        fn describe(&self) -> String {
+            format!("Metal: {}", self.device.name())
+        }
+    }
+
+    /// The prover on the system default Metal device.
+    pub type MetalProver = Prover<MetalBackend>;
+
+    impl MetalProver {
+        /// Open the system default device and compile the shader source.
+        pub fn new() -> Result<Self> {
+            Ok(Prover::with_backend(MetalBackend::new()?))
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub use metal_backend::{MetalBackend, MetalProver};
+
+// ---- the shaders on the CPU ----------------------------------------------------------------
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+mod host_backend {
+    use std::{
+        cell::UnsafeCell,
+        ffi::{c_char, c_void, CString},
+    };
+
+    use anyhow::Result;
+
+    use super::{Arg, Backend, Prover};
+
+    extern "C" {
+        /// `msl-host/shim.cpp`: the kernel by name, its arguments in
+        /// `[[buffer(i)]]` order as raw pointers, the thread count.
+        fn msl_run(kernel: *const c_char, args: *const *const c_void, nargs: u32, n: u32) -> i32;
+    }
+
+    /// A buffer the shaders read and write on the CPU.
+    pub struct HostBuf(UnsafeCell<Vec<u8>>);
+
+    impl HostBuf {
+        fn ptr(&self) -> *mut u8 {
+            // SAFETY: runs are sequential and single-threaded; a kernel writes only its
+            // output buffer, which no argument aliases.
+            let v: &mut Vec<u8> = unsafe { &mut *self.0.get() };
+            v.as_mut_ptr()
+        }
+
+        fn len(&self) -> usize {
+            // SAFETY: as above; the length never changes after construction.
+            let v: &Vec<u8> = unsafe { &*self.0.get() };
+            v.len()
+        }
+    }
+
+    /// The shaders compiled as C++ by the build script, run one thread index at a time.
+    #[derive(Default)]
+    pub struct HostBackend;
+
+    impl Backend for HostBackend {
+        type Buf = HostBuf;
+
+        fn upload(&self, bytes: &[u8]) -> HostBuf {
+            let mut v = bytes.to_vec();
+            v.resize(bytes.len().max(16), 0);
+            HostBuf(UnsafeCell::new(v))
+        }
+
+        fn alloc(&self, bytes: usize) -> HostBuf {
+            HostBuf(UnsafeCell::new(vec![0u8; bytes.max(16)]))
+        }
+
+        fn read(&self, buf: &HostBuf, bytes: usize) -> Vec<u8> {
+            // SAFETY: no run is in progress; the buffer holds at least `bytes` bytes.
+            let v: &Vec<u8> = unsafe { &*buf.0.get() };
+            v[..bytes].to_vec()
+        }
+
+        fn len(&self, buf: &HostBuf) -> usize {
+            buf.len()
+        }
+
+        fn run(&self, kernel: &str, n: usize, args: &[Arg<'_, HostBuf>]) {
+            let name = CString::new(kernel).expect("kernel name");
+            let ptrs: Vec<*const c_void> = args
+                .iter()
+                .map(|a| match a {
+                    Arg::Buf(b) => b.ptr() as *const c_void,
+                    Arg::Bytes(b) => b.as_ptr() as *const c_void,
+                })
+                .collect();
+            // SAFETY: the shim reads each argument as the kernel's `[[buffer(i)]]` type; the
+            // buffers were sized by the same pipeline that sizes them for Metal.
+            let rc = unsafe { msl_run(name.as_ptr(), ptrs.as_ptr(), ptrs.len() as u32, n as u32) };
+            assert_eq!(rc, 0, "kernel `{kernel}` is not in the shim");
+        }
+
+        fn describe(&self) -> String {
+            "the Metal shaders compiled as C++, on the CPU".into()
+        }
+    }
+
+    /// The prover over the shaders on the CPU — the Metal arm's `oxide-cpu`.
+    pub type HostMslProver = Prover<HostBackend>;
+
+    impl HostMslProver {
+        /// The shaders as built by the build script.
+        pub fn new() -> Result<Self> {
+            Ok(Prover::with_backend(HostBackend))
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub use host_backend::{HostBackend, HostBuf, HostMslProver};
+
+/// Produce a proof on the system default Metal device (macOS), or on the CPU
+/// through the shaders compiled as C++ (elsewhere).
 pub fn prove(zkey: &Zkey, witness: &[Fr], r: &Fr, s: &Fr) -> Result<Proof> {
-    MetalProver::new()
-        .context("Metal device")?
-        .prove(zkey, witness, r, s)
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let prover = MetalProver::new()?;
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    let prover = HostMslProver::new()?;
+    prover.prove(zkey, witness, r, s)
+}
+
+#[cfg(all(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
+mod host_tests {
+    use super::*;
+
+    /// The Metal shaders, run on the CPU: every kernel, the MSM on G1 and G2,
+    /// and a whole fixture proof agree with the Rust bodies and the core
+    /// prover — the same check the Mac runs on the device.
+    #[test]
+    fn shaders_on_the_cpu_agree_with_the_rust_bodies_down_to_a_fixture_proof() {
+        let prover = HostMslProver::new().unwrap();
+        let checks = prover.kernel_check().unwrap();
+        assert_eq!(checks.len(), 13, "10 kernels, 2 MSMs, 1 proof");
+        for c in &checks {
+            assert!(c.ok, "{}: {}", c.kernel, c.detail);
+        }
+    }
 }

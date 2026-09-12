@@ -12,15 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `groth16-metal-kernel-check`: compile the shaders on this Mac and compare
-//! every kernel against the Rust bodies on small inputs. Run this first.
+//! `groth16-metal-kernel-check`: every kernel, the MSM and a fixture proof
+//! against the Rust bodies — on the system default Metal device (macOS), or
+//! on the CPU through the shaders compiled as C++ (everywhere else). Exit
+//! status 0 only when every check agrees. Run this first on a Mac.
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use risc0_groth16_metal::device::Backend as _;
+
 fn main() -> anyhow::Result<()> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     let prover = risc0_groth16_metal::device::MetalProver::new()?;
-    println!("{prover:?}: shaders compiled");
-    let mut failed = 0;
-    for c in prover.kernel_check()? {
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    let prover = risc0_groth16_metal::device::HostMslProver::new()?;
+    println!("{}: shaders compiled", prover.backend().describe());
+    let checks = prover.kernel_check()?;
+    let failed = checks.iter().filter(|c| !c.ok).count();
+    for c in &checks {
         println!(
             "{:<24} {}{}",
             c.kernel,
@@ -31,18 +38,13 @@ fn main() -> anyhow::Result<()> {
                 format!("  ({})", c.detail)
             }
         );
-        if !c.ok {
-            failed += 1;
-        }
     }
     if failed > 0 {
-        anyhow::bail!("{failed} kernel(s) disagree with the Rust bodies");
+        anyhow::bail!("{failed} check(s) disagree with the Rust bodies");
     }
+    println!(
+        "all {} checks agree with risc0_groth16_oxide::kernels and the core prover",
+        checks.len()
+    );
     Ok(())
-}
-
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-fn main() {
-    eprintln!("groth16-metal-kernel-check runs only on macOS / Apple Silicon");
-    std::process::exit(2);
 }

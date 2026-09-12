@@ -35,7 +35,6 @@
 
 pub mod pack;
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod device;
 
 /// The complete shader source: constants, then kernels.
