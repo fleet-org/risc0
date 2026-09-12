@@ -1,0 +1,12 @@
+# Metal Shading Language is C++14 with attributes; clang-format lays it out as such.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AlignAfterOpenBracket: Align
+BinPackParameters: false
+BinPackArguments: true
+BreakBeforeBraces: Attach
+PointerAlignment: Left
+SpaceBeforeParens: ControlStatements

@@ -1,6 +1,6 @@
 [package]
 name = "risc0-groth16-oxide"
-description = "GROTH16 s01/4 — the CUDA arm's kernels as plain Rust (cuda-oxide compiles them to PTX), with a CPU grid emulation that proves them before a GPU runs them"
+description = "GROTH16 s01/4: the CUDA arm as plain Rust (bodies, ABI, schedule, CPU launcher)"
 version = "0.1.0"
 edition = { workspace = true }
 license = { workspace = true }

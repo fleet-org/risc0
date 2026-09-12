@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CUDA 13 headers without a toolkit or root: the driver-API, runtime, CRT, CCCL and cuRAND dev
 # packages from NVIDIA's Ubuntu 24.04 repository, extracted with dpkg-deb into <dest>. Enough for
-# `cuda-bindings` (bindgen over cuda.h + curand.h) and therefore for type-checking risc0-groth16-cuda
+# `cuda-bindings` (bindgen over cuda.h + curand.h), hence for type-checking risc0-groth16-cuda
 # on a machine with no GPU — CI and the CRCS both use it. Prints the two variables to export.
 #
 #   eval "$(groth16_s01/scripts/cuda-headers.sh "$HOME/cuda-headers")"
@@ -21,13 +21,22 @@ pick() { # newest Filename of a package
     f && /^Filename:/ { fn = $2 }
     f && /^$/         { print v, fn; f = 0 }' | sort -V | tail -1 | cut -d' ' -f2
 }
-for p in cuda-driver-dev-$series cuda-cudart-dev-$series cuda-crt-$series cuda-cccl-$series libcurand-dev-$series; do
-  f=$(pick "$p"); [ -n "$f" ] || { echo "cuda-headers: no package $p in $repo" >&2; exit 1; }
+pkgs=(cuda-driver-dev cuda-cudart-dev cuda-crt cuda-cccl libcurand-dev)
+for name in "${pkgs[@]}"; do
+  p=$name-$series
+  f=$(pick "$p")
+  [ -n "$f" ] || {
+    echo "cuda-headers: no package $p in $repo" >&2
+    exit 1
+  }
   deb="$dest/debs/$(basename "$f")"
   [ -f "$deb" ] || curl -sSfL -o "$deb" "$repo/${f#./}"
   dpkg-deb -x "$deb" "$dest/tree"
 done
 root=$(find "$dest/tree" -maxdepth 4 -type d -name "cuda-${series/-/.}*" | head -1)
-[ -f "$root/include/cuda.h" ] || [ -f "$root/targets/x86_64-linux/include/cuda.h" ] || { echo "cuda-headers: cuda.h not found under $root" >&2; exit 1; }
+[ -f "$root/include/cuda.h" ] || [ -f "$root/targets/x86_64-linux/include/cuda.h" ] || {
+  echo "cuda-headers: cuda.h not found under $root" >&2
+  exit 1
+}
 echo "CUDA_HOME=$root"
 echo "CUDA_TOOLKIT_PATH=$root"
