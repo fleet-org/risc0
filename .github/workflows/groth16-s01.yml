@@ -12,6 +12,8 @@ on:
     branches: [integration/staging-platform]
     paths:
       - 'risc0/groth16-core/**'
+      - 'risc0/groth16-metal/**'
+      - 'risc0/groth16-oxide/**'
       - 'risc0/groth16-sys/**'
       - 'risc0/groth16/**'
       - 'groth16_s01/**'
@@ -20,6 +22,8 @@ on:
     branches: [integration/staging-platform]
     paths:
       - 'risc0/groth16-core/**'
+      - 'risc0/groth16-metal/**'
+      - 'risc0/groth16-oxide/**'
       - 'risc0/groth16-sys/**'
       - 'risc0/groth16/**'
       - 'groth16_s01/**'
@@ -48,9 +52,32 @@ jobs:
         run: cargo test -p risc0-groth16-sys --locked
       - name: Reference backend through the boundary, verified by risc0-groth16's verifier
         run: cargo test -p risc0-groth16-sys --features reference --locked
+      - name: CUDA arm kernel bodies on the CPU launcher (byte-identical proof to the reference; no_std build)
+        run: |
+          cargo test -p risc0-groth16-oxide --locked
+          cargo check -p risc0-groth16-oxide --no-default-features --locked
+          cargo test -p risc0-groth16-sys --features reference,oxide-cpu --locked
+      - name: Metal arm host side (record layouts, shader source) and its darwin type-check
+        run: |
+          cargo test -p risc0-groth16-metal --locked
+          cargo check -p risc0-groth16-metal --target aarch64-apple-darwin --locked
       - name: Type-check the canonical CUDA path without nvcc
         env:
           RISC0_SKIP_BUILD_KERNELS: "1"
         run: cargo check -p risc0-groth16-sys --features cuda --locked
       - name: Type-check for aarch64-apple-darwin (Metal arm target; no SDK needed for check)
-        run: cargo check -p risc0-groth16-sys -p risc0-groth16-core --target aarch64-apple-darwin --locked
+        run: cargo check -p risc0-groth16-sys -p risc0-groth16-core -p risc0-groth16-oxide --target aarch64-apple-darwin --locked
+
+  harness:
+    name: s01/5 harness compiles (CPU prover + reference arm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned by rust-toolchain.toml) + protoc for circom-witnesscalc's build script
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libclang-dev
+          protoc --version
+      - name: Type-check the harness (pulls the CPU recursion prover; no artifacts needed to compile)
+        run: cargo check -p groth16-s01-harness --locked

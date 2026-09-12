@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "bonsai/sdk",
+  "groth16_s01/harness",
   "risc0/bigint2",
   "risc0/bigint2/methods",
   "risc0/binfmt",
@@ -17,6 +18,8 @@ members = [
   "risc0/core",
   "risc0/groth16",
   "risc0/groth16-core",
+  "risc0/groth16-metal",
+  "risc0/groth16-oxide",
   "risc0/groth16-sys",
   "risc0/povw",
   "risc0/povw/guests",

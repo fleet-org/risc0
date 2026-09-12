@@ -1,0 +1,24 @@
+[package]
+name = "risc0-groth16-oxide"
+description = "GROTH16 s01/4 — the CUDA arm's kernels as plain Rust (cuda-oxide compiles them to PTX), with a CPU grid emulation that proves them before a GPU runs them"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+publish = false
+
+[dependencies]
+risc0-groth16-core = { path = "../groth16-core", default-features = false }
+
+[dev-dependencies]
+ark-bn254 = "0.5.0"
+ark-ec = "0.5.0"
+ark-ff = "0.5.0"
+ark-groth16 = { version = "0.5.0", default-features = false }
+risc0-groth16-core = { path = "../groth16-core" }
+
+[features]
+default = ["std"]
+# The host pipeline (buffers, sorting, launch sequencing) and the CPU launcher.
+std = ["risc0-groth16-core/std"]

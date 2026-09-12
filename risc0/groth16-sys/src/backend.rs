@@ -70,15 +70,20 @@ pub enum BackendKind {
     /// arithmetic run on the host. For tests and the differential harness —
     /// never the default, not a production path.
     Reference,
+    /// The cuda-oxide arm's kernel bodies (`risc0-groth16-oxide`) run by the
+    /// host launcher: the exact kernel code, without a GPU. A testing kind
+    /// like `reference` — never the default, not a production path.
+    OxideCpu,
 }
 
 impl BackendKind {
     /// Every kind, in a stable order.
-    pub const ALL: [BackendKind; 4] = [
+    pub const ALL: [BackendKind; 5] = [
         BackendKind::Canonical,
         BackendKind::CudaOxide,
         BackendKind::Metal,
         BackendKind::Reference,
+        BackendKind::OxideCpu,
     ];
 
     /// The kind used when [`BACKEND_ENV`] is absent.
@@ -91,6 +96,7 @@ impl BackendKind {
             BackendKind::CudaOxide => "cuda-oxide",
             BackendKind::Metal => "metal",
             BackendKind::Reference => "reference",
+            BackendKind::OxideCpu => "oxide-cpu",
         }
     }
 
@@ -253,11 +259,16 @@ pub fn compiled_in() -> Registry {
     let registry = registry.with(Box::new(canonical::Canonical));
     #[cfg(feature = "reference")]
     let registry = registry.with(Box::new(reference::Reference));
+    #[cfg(feature = "oxide-cpu")]
+    let registry = registry.with(Box::new(oxide_cpu::OxideCpu));
     registry
 }
 
-#[cfg(feature = "reference")]
+#[cfg(any(feature = "reference", feature = "oxide-cpu"))]
 pub mod reference;
+
+#[cfg(feature = "oxide-cpu")]
+pub mod oxide_cpu;
 
 #[cfg(feature = "cuda")]
 mod canonical {
@@ -447,10 +458,13 @@ mod tests {
         if cfg!(feature = "reference") {
             expected.push(BackendKind::Reference);
         }
+        if cfg!(feature = "oxide-cpu") {
+            expected.push(BackendKind::OxideCpu);
+        }
         assert_eq!(compiled_in().available(), expected);
     }
 
-    #[cfg(not(any(feature = "cuda", feature = "reference")))]
+    #[cfg(not(any(feature = "cuda", feature = "reference", feature = "oxide-cpu")))]
     #[test]
     fn a_build_without_backends_reports_unavailable_rather_than_answering() {
         let err = compiled_in().select(None).unwrap_err();

@@ -1,0 +1,357 @@
+// Copyright 2026 RISC Zero, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! The host pipeline: it owns buffers, the coefficient grouping, the
+//! twiddle and shift tables, the per-window counting sort, and the launch
+//! sequence. It launches only the bodies in [`crate::kernels`], in the order
+//! the canonical kernels run them (`BOUNDARY.md` §2), and hands the five MSM
+//! results to the shared assembly.
+
+use risc0_groth16_core::{
+    ec::{Affine, Jacobian},
+    field::{Field, Fr},
+    prover::{assemble, counting_sort_by_digit, horner, reduce_buckets, Msms, Proof, ProveError},
+    zkey::Zkey,
+};
+
+use crate::{kernels, launch::Launcher};
+
+/// Pippenger window width used by this arm.
+pub const WINDOW_BITS: u32 = 12;
+
+pub use risc0_groth16_core::prover::{CoefficientGroups, Tables};
+
+/// Evaluate one matrix's polynomial on the domain from its groups.
+fn scatter<L: Launcher>(
+    l: &L,
+    coeffs: &[kernels::Coeff],
+    starts: &[u32],
+    constraint: &[u32],
+    witness: &[Fr],
+    domain: usize,
+) -> Vec<Fr> {
+    let mut sums = vec![Fr::ZERO; constraint.len()];
+    l.map(&mut sums, |g| {
+        kernels::scatter_group(g, coeffs, starts, witness)
+    });
+    let mut poly = vec![Fr::ZERO; domain];
+    for (c, v) in constraint.iter().zip(sums) {
+        poly[*c as usize] = v;
+    }
+    poly
+}
+
+/// Bit-reverse then run the log2(n) stages, ping-ponging between `a` and `b`.
+/// Returns which buffer holds the result.
+fn ntt<L: Launcher>(l: &L, a: &mut [Fr], b: &mut [Fr], twiddles: &[Fr], lg_n: u32) -> bool {
+    let n = a.len();
+    l.map(b, |i| kernels::bit_reverse(i, a, lg_n));
+    let mut in_b = true;
+    let mut len = 2;
+    while len <= n {
+        let stride = n / len;
+        if in_b {
+            l.map(a, |i| kernels::ntt_stage(i, b, len, twiddles, stride));
+        } else {
+            l.map(b, |i| kernels::ntt_stage(i, a, len, twiddles, stride));
+        }
+        in_b = !in_b;
+        len <<= 1;
+    }
+    in_b
+}
+
+/// Evaluations on `H` → evaluations on the coset `shift·H` (inverse NTT,
+/// scale by `1/n`, coset scale, forward NTT), through the kernels.
+pub fn h_to_coset<L: Launcher>(l: &L, evals: Vec<Fr>, t: &Tables) -> Vec<Fr> {
+    let mut scratch = vec![Fr::ZERO; evals.len()];
+    h_to_coset_with(l, evals, &mut scratch, t)
+}
+
+/// [`h_to_coset`] with a caller-provided scratch buffer of the same length
+/// (reused across the three polynomials, so only one extra buffer is live).
+pub fn h_to_coset_with<L: Launcher>(
+    l: &L,
+    evals: Vec<Fr>,
+    scratch: &mut Vec<Fr>,
+    t: &Tables,
+) -> Vec<Fr> {
+    let n = evals.len();
+    let mut a = evals;
+    let mut b = std::mem::take(scratch);
+    assert_eq!(b.len(), n, "scratch must match the domain");
+    let in_b = ntt(l, &mut a, &mut b, &t.inverse, t.lg_n);
+    let (src, dst) = if in_b { (&b, &mut a) } else { (&a, &mut b) };
+    // 1/n and the shift powers in one pass: coeff_i · n⁻¹ · shift^i
+    l.map(dst, |i| {
+        kernels::pointwise_scale(i, src, &t.shift_powers).mul(&t.n_inv)
+    });
+    let (mut a, mut b) = if in_b { (a, b) } else { (b, a) };
+    let in_b = ntt(l, &mut a, &mut b, &t.forward, t.lg_n);
+    let (result, leftover) = if in_b { (b, a) } else { (a, b) };
+    *scratch = leftover;
+    result
+}
+
+/// MSM through the kernels: digits per window on the device, a counting sort
+/// by digit on the host, bucket sums on the device, the bucket reduction and
+/// Horner combination on the host.
+pub fn msm<L: Launcher, F: Field + Send + Sync>(
+    l: &L,
+    points: &[Affine<F>],
+    scalars: &[Fr],
+) -> Jacobian<F> {
+    assert_eq!(points.len(), scalars.len());
+    let canonical: Vec<[u64; 4]> = scalars.iter().map(Fr::to_canonical).collect();
+    let w = WINDOW_BITS;
+    let buckets = (1usize << w) - 1;
+    let windows = 256u32.div_ceil(w);
+    let mut window_sums = Vec::with_capacity(windows as usize);
+    let mut digits = vec![0u32; points.len()];
+    for window in 0..windows {
+        l.map(&mut digits, |i| kernels::digit(i, &canonical, window, w));
+        let (order, starts) = counting_sort_by_digit(&digits, buckets);
+        let mut sums = vec![Jacobian::<F>::INFINITY; buckets];
+        l.map(&mut sums, |b| {
+            kernels::bucket_sum(b, points, &order, &starts)
+        });
+        window_sums.push(reduce_buckets(&sums));
+    }
+    horner(&window_sums, w)
+}
+
+/// The arm's prover: the canonical kernel sequence on a launcher, the
+/// shared assembly on the host.
+pub fn prove<L: Launcher>(
+    l: &L,
+    zkey: &Zkey,
+    witness: &[Fr],
+    r: &Fr,
+    s: &Fr,
+) -> Result<Proof, ProveError> {
+    let groups = CoefficientGroups::from_zkey(zkey);
+    prove_grouped(l, zkey, &groups, witness, r, s)
+}
+
+/// [`prove`] with the coefficient groups supplied by the caller (who may have
+/// dropped the zkey's flat coefficient list to halve that memory).
+pub fn prove_grouped<L: Launcher>(
+    l: &L,
+    zkey: &Zkey,
+    groups: &CoefficientGroups,
+    witness: &[Fr],
+    r: &Fr,
+    s: &Fr,
+) -> Result<Proof, ProveError> {
+    if witness.len() != zkey.num_vars {
+        return Err(ProveError::WitnessLength {
+            expected: zkey.num_vars,
+            found: witness.len(),
+        });
+    }
+    if witness[0] != Fr::ONE {
+        return Err(ProveError::WitnessConstant);
+    }
+    let n = zkey.domain_size;
+    let tables = Tables::new(n);
+
+    let a_h = scatter(
+        l,
+        &groups.a,
+        &groups.a_starts,
+        &groups.a_constraint,
+        witness,
+        n,
+    );
+    let b_h = scatter(
+        l,
+        &groups.b,
+        &groups.b_starts,
+        &groups.b_constraint,
+        witness,
+        n,
+    );
+    let mut c_h = vec![Fr::ZERO; n];
+    l.map(&mut c_h, |i| kernels::pointwise_mul(i, &a_h, &b_h));
+
+    let mut scratch = vec![Fr::ZERO; n];
+    let a_c = h_to_coset_with(l, a_h, &mut scratch, &tables);
+    let b_c = h_to_coset_with(l, b_h, &mut scratch, &tables);
+    let c_c = h_to_coset_with(l, c_h, &mut scratch, &tables);
+    let mut quotient = scratch;
+    l.map(&mut quotient, |i| {
+        kernels::pointwise_mul_sub(i, &a_c, &b_c, &c_c)
+    });
+    drop((a_c, b_c, c_c));
+
+    let msms = Msms {
+        h: msm(l, &zkey.h, &quotient),
+        a: msm(l, &zkey.a, witness),
+        b1: msm(l, &zkey.b1, witness),
+        b2: msm(l, &zkey.b2, witness),
+        c: msm(l, &zkey.c, &witness[zkey.num_public + 1..]),
+    };
+    Ok(assemble(zkey, &msms, r, s))
+}
+
+#[cfg(test)]
+mod tests {
+    use ark_ec::{AffineRepr as _, CurveGroup as _, PrimeGroup as _};
+    use ark_ff::{BigInteger as _, PrimeField as _};
+    use ark_groth16::Groth16;
+    use risc0_groth16_core::{
+        ec::{G1Affine, G2Affine},
+        field::Fp,
+        fp2::Fp2,
+        ntt::{self, lg2},
+        zkey::parse_wtns,
+    };
+
+    use super::*;
+    use crate::launch::{CpuLauncher, SerialLauncher};
+
+    const ZKEY: &[u8] =
+        include_bytes!("../../../groth16_proof/circom-compat/test/data/multiplier2_final.zkey");
+    const WTNS: &[u8] =
+        include_bytes!("../../../groth16_proof/circom-compat/test/data/multiplier2.wtns");
+
+    fn fp_to_ark(v: &Fp) -> ark_bn254::Fq {
+        ark_bn254::Fq::from_le_bytes_mod_order(&v.to_le_bytes())
+    }
+    fn fp_from_ark(v: ark_bn254::Fq) -> Fp {
+        Fp::from_le_bytes(&v.into_bigint().to_bytes_le().try_into().unwrap()).unwrap()
+    }
+    fn fr_to_ark(v: &Fr) -> ark_bn254::Fr {
+        ark_bn254::Fr::from_le_bytes_mod_order(&v.to_le_bytes())
+    }
+    fn fr_from_ark(v: ark_bn254::Fr) -> Fr {
+        Fr::from_le_bytes(&v.into_bigint().to_bytes_le().try_into().unwrap()).unwrap()
+    }
+    fn g1_to_ark(p: &G1Affine) -> ark_bn254::G1Affine {
+        if p.infinity {
+            ark_bn254::G1Affine::identity()
+        } else {
+            ark_bn254::G1Affine::new_unchecked(fp_to_ark(&p.x), fp_to_ark(&p.y))
+        }
+    }
+    fn g1_from_ark(p: ark_bn254::G1Affine) -> G1Affine {
+        match p.xy() {
+            None => G1Affine::INFINITY,
+            Some((x, y)) => G1Affine::new(fp_from_ark(x), fp_from_ark(y)),
+        }
+    }
+    fn g2_to_ark(p: &G2Affine) -> ark_bn254::G2Affine {
+        if p.infinity {
+            ark_bn254::G2Affine::identity()
+        } else {
+            let c = |v: &Fp2| ark_bn254::Fq2::new(fp_to_ark(&v.c0), fp_to_ark(&v.c1));
+            ark_bn254::G2Affine::new_unchecked(c(&p.x), c(&p.y))
+        }
+    }
+    struct Scalars(u64);
+    impl Scalars {
+        fn next_fr(&mut self) -> ark_bn254::Fr {
+            let mut b = [0u8; 32];
+            for chunk in b.chunks_mut(8) {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                chunk.copy_from_slice(&x.to_le_bytes());
+            }
+            ark_bn254::Fr::from_le_bytes_mod_order(&b)
+        }
+    }
+
+    fn verify(z: &Zkey, p: &Proof, public: &[Fr]) -> bool {
+        let vk = ark_groth16::VerifyingKey::<ark_bn254::Bn254> {
+            alpha_g1: g1_to_ark(&z.vk.alpha_g1),
+            beta_g2: g2_to_ark(&z.vk.beta_g2),
+            gamma_g2: g2_to_ark(&z.vk.gamma_g2),
+            delta_g2: g2_to_ark(&z.vk.delta_g2),
+            gamma_abc_g1: z.ic.iter().map(g1_to_ark).collect(),
+        };
+        let pvk = ark_groth16::prepare_verifying_key(&vk);
+        let proof = ark_groth16::Proof {
+            a: g1_to_ark(&p.a),
+            b: g2_to_ark(&p.b),
+            c: g1_to_ark(&p.c),
+        };
+        let inputs: Vec<ark_bn254::Fr> = public.iter().map(fr_to_ark).collect();
+        Groth16::<ark_bn254::Bn254>::verify_proof(&pvk, &proof, &inputs).unwrap()
+    }
+
+    #[test]
+    fn kernel_ntt_matches_the_core_transform() {
+        let n = 64;
+        let mut s = Scalars(0x3131);
+        let data: Vec<Fr> = (0..n).map(|_| fr_from_ark(s.next_fr())).collect();
+        let t = Tables::new(n);
+        let mine = h_to_coset(&SerialLauncher, data.clone(), &t);
+        let mut expected = data.clone();
+        ntt::h_to_coset(&mut expected, &Fr::two_adic_root(lg2(n) + 1));
+        assert_eq!(mine, expected);
+        let par = h_to_coset(&CpuLauncher { threads: 5 }, data, &t);
+        assert_eq!(par, expected, "chunked launcher agrees with serial");
+    }
+
+    #[test]
+    fn kernel_msm_matches_the_core_msm() {
+        let mut s = Scalars(0x4242);
+        let g = ark_bn254::G1Projective::generator();
+        let pts: Vec<G1Affine> = (0..100)
+            .map(|_| g1_from_ark((g * s.next_fr()).into_affine()))
+            .collect();
+        let ks: Vec<Fr> = (0..100).map(|_| fr_from_ark(s.next_fr())).collect();
+        let expected = risc0_groth16_core::msm::msm_naive(&pts, &ks);
+        assert_eq!(msm(&CpuLauncher { threads: 3 }, &pts, &ks), expected);
+        assert_eq!(msm(&SerialLauncher, &pts, &ks), expected);
+    }
+
+    #[test]
+    fn fixture_proof_through_the_kernels_verifies_and_matches_core_for_fixed_blinding() {
+        let z = Zkey::parse(ZKEY).unwrap();
+        let w = parse_wtns(WTNS).unwrap();
+        let (r, s) = (Fr::from_u64(5), Fr::from_u64(9));
+        let proof = prove(&CpuLauncher::default(), &z, &w, &r, &s).unwrap();
+        assert!(verify(&z, &proof, &w[1..=z.num_public]));
+        let core = risc0_groth16_core::prover::prove(&z, &w, &r, &s).unwrap();
+        assert_eq!(
+            proof, core,
+            "same blinding ⇒ the two pipelines produce the identical proof"
+        );
+        let mut bad = w.clone();
+        bad[1] = Fr::from_u64(34);
+        assert!(!verify(
+            &z,
+            &prove(&SerialLauncher, &z, &bad, &r, &s).unwrap(),
+            &bad[1..=z.num_public]
+        ));
+    }
+
+    #[test]
+    fn coefficient_groups_cover_every_coefficient_once() {
+        let z = Zkey::parse(ZKEY).unwrap();
+        let g = CoefficientGroups::from_zkey(&z);
+        assert_eq!(g.a.len() + g.b.len(), z.coefficients.len());
+        assert_eq!(g.a_starts.len(), g.a_constraint.len() + 1);
+        assert_eq!(g.b_starts.len(), g.b_constraint.len() + 1);
+        assert_eq!(*g.a_starts.last().unwrap() as usize, g.a.len());
+        assert!(
+            g.a_constraint.windows(2).all(|p| p[0] < p[1]),
+            "groups ascend by constraint"
+        );
+    }
+}

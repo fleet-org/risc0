@@ -4124,6 +4124,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "groth16-s01-harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "circom-witnesscalc",
+ "hex",
+ "risc0-binfmt",
+ "risc0-groth16",
+ "risc0-groth16-core",
+ "risc0-groth16-sys",
+ "risc0-zkos-v1compat",
+ "risc0-zkvm",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7206,6 +7225,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "risc0-groth16-metal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ark-bn254",
+ "ark-ff 0.5.0",
+ "metal",
+ "risc0-groth16-core",
+]
+
+[[package]]
+name = "risc0-groth16-oxide"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff 0.5.0",
+ "ark-groth16",
+ "risc0-groth16-core",
+]
+
+[[package]]
 name = "risc0-groth16-sys"
 version = "0.1.0"
 dependencies = [
@@ -7215,6 +7256,7 @@ dependencies = [
  "risc0-build-kernel",
  "risc0-groth16",
  "risc0-groth16-core",
+ "risc0-groth16-oxide",
  "serde_json",
  "sppark",
  "tempfile",

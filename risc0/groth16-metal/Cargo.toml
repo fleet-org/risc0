@@ -1,0 +1,20 @@
+[package]
+name = "risc0-groth16-metal"
+description = "GROTH16 s01/4b — the Metal arm: MSL kernels for the Groth16 prover stage on Apple Silicon (macOS 13+), host pipeline in Rust"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+risc0-groth16-core = { path = "../groth16-core" }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+metal = { workspace = true }
+
+[dev-dependencies]
+ark-bn254 = "0.5.0"
+ark-ff = "0.5.0"

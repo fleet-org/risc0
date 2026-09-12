@@ -37,7 +37,7 @@ pub struct Reference;
 /// A uniformly random scalar: 31 random bytes, as the canonical kernels draw
 /// `r` and `s` (`randombytes_buf(&r, sizeof(fr_t) - 1)`), so the value is
 /// below the modulus by construction.
-fn random_scalar() -> anyhow::Result<Fr> {
+pub(crate) fn random_scalar() -> anyhow::Result<Fr> {
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes[..31]).map_err(|e| anyhow!("randomness unavailable: {e}"))?;
     Fr::from_le_bytes(&bytes).ok_or_else(|| anyhow!("31 random bytes exceeded the modulus"))
@@ -49,9 +49,12 @@ impl Groth16Backend for Reference {
     }
 
     fn prove(&self, prover: &ProverParams, setup: &SetupParams) -> anyhow::Result<()> {
-        let zkey_bytes = std::fs::read(setup.srs_path.as_path())
-            .with_context(|| format!("reading zkey {}", setup.srs_path.as_path().display()))?;
-        let zkey = Zkey::parse(&zkey_bytes).context("parsing zkey")?;
+        // Parse, then drop the file bytes: the zkey is multi-GB and the proof holds memory long.
+        let zkey = {
+            let zkey_bytes = std::fs::read(setup.srs_path.as_path())
+                .with_context(|| format!("reading zkey {}", setup.srs_path.as_path().display()))?;
+            Zkey::parse(&zkey_bytes).context("parsing zkey")?
+        };
         // SAFETY: the boundary contract (BOUNDARY.md §4.1) is that `witness` points at
         // `num_vars` consecutive 32-byte canonical field elements, `num_vars` being the
         // zkey header's value — exactly what the canonical kernels dereference.
