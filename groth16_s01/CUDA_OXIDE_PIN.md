@@ -191,3 +191,28 @@ the template's two UNVERIFIED points and corrected one statement above:
   (`#![feature(f16)]`, proc-macro features), with or without the backend; a device-only crate
   `cargo check`s on that nightly with no CUDA toolkit; `cuda-macros` must be
   `default-features = false` (its `host` feature emits `cuda_host` loaders that need `cuda.h`).
+
+## Addendum (C13) — the device module compiled and validated without a GPU, MEASURED 2026-09-12
+
+- **Toolchain, rootless, on the session box:** nightly-2026-08-28 (rust-src, rustc-dev, llvm-tools),
+  `cargo-oxide` installed from the pinned commit (`cargo +nightly install --git … --root ~`, host
+  target pinned — the home cargo config's musl default breaks the install otherwise),
+  `cargo oxide setup` (the backend, ≈ 2 minutes), the CUDA 13.0 headers and the `cuda-nvcc` package
+  (ptxas) from NVIDIA's repository by `groth16_s01/scripts/cuda-headers.sh`. `cargo oxide doctor`
+  reports libNVVM, nvJitLink and libdevice missing, which matters only for libdevice math; these
+  kernels are integer-only.
+- **What compiled:** `groth16_s01/cuda-kernels` type-checks, is clippy-clean, and
+  `cargo oxide build --arch sm_89` / `--arch sm_120` each emit `risc0_groth16_cuda_kernels.ptx` (688
+  KB, `.version 7.8`), settling verdict item 4: the two-phase shape (device crate built alone, host
+  loads the `.ptx`) works.
+- **What the PTX shows (`groth16_s01/scripts/ptx-check.sh`):** ten `.visible .entry` kernels under
+  the ABI's names; parameters as the ABI says — `.u64 .ptr` per pointer, `.u32` per length or
+  scalar, one `.align 8 .b8 [32]` byval param for the by-value `Fr` (question 3 of the template
+  review, settled); `ptxas` assembles the `sm_89` module for `sm_89` and `sm_120` and the `sm_120`
+  module for `sm_120`.
+- **One device limitation, fixed:** a derived `PartialEq` on `[u64; 4]` lowers to the `raw_eq`
+  intrinsic, "not yet supported on the device"; `risc0-groth16-core`'s field types now compare
+  limb-wise (I-G16-023). Everything else the kernels reach — 64×64→128 products, the `bool` in
+  `Affine`, the generic `bucket_sum<F>`, cross-crate bodies — lowered without change.
+- **Still UNVERIFIED:** the launches (driver load, per-kernel agreement, coexistence, timing) — the
+  CUDA host's first hour, from the `ptx-c13` release's PTX.

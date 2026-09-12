@@ -32,8 +32,12 @@
 //! 1-D launch, and the `n` bound check.
 
 #![no_std]
+// A kernel's signature IS the ABI (risc0_groth16_oxide::abi): its arity follows the body's inputs,
+// each slice a (ptr, len) pair, and its safety contract is the ABI's, stated once there — so the
+// per-function `# Safety` section and the argument-count lint would restate the module doc.
+#![allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
 
-use cuda_device::{cuda_module, kernel, thread};
+use cuda_device::cuda_module;
 
 /// A device slice from an ABI `(ptr, len)` pair — a plain helper (the collector
 /// compiles every function a kernel reaches; only thread-index readers need
@@ -74,7 +78,14 @@ pub mod groth16 {
         let i = thread::index_1d().get();
         if i < n as usize {
             // SAFETY: the host sized `out` for `n` outputs and the inputs per the ABI.
-            unsafe { *out.add(i) = kernels::scatter_group(i, sl(coeffs, coeffs_len), sl(starts, starts_len), sl(witness, witness_len)) };
+            unsafe {
+                *out.add(i) = kernels::scatter_group(
+                    i,
+                    sl(coeffs, coeffs_len),
+                    sl(starts, starts_len),
+                    sl(witness, witness_len),
+                )
+            };
         }
     }
 
@@ -110,7 +121,10 @@ pub mod groth16 {
         let i = thread::index_1d().get();
         if i < n as usize {
             // SAFETY: as above.
-            unsafe { *out.add(i) = kernels::pointwise_mul_sub(i, sl(a, a_len), sl(b, b_len), sl(c, c_len)) };
+            unsafe {
+                *out.add(i) =
+                    kernels::pointwise_mul_sub(i, sl(a, a_len), sl(b, b_len), sl(c, c_len))
+            };
         }
     }
 
@@ -129,7 +143,13 @@ pub mod groth16 {
         let i = thread::index_1d().get();
         if i < n as usize {
             // SAFETY: as above.
-            unsafe { *out.add(i) = kernels::scale(0, &[kernels::pointwise_scale(i, sl(a, a_len), sl(k, k_len))], &n_inv) };
+            unsafe {
+                *out.add(i) = kernels::scale(
+                    0,
+                    &[kernels::pointwise_scale(i, sl(a, a_len), sl(k, k_len))],
+                    &n_inv,
+                )
+            };
         }
     }
 
@@ -158,7 +178,15 @@ pub mod groth16 {
         let i = thread::index_1d().get();
         if i < n as usize {
             // SAFETY: as above.
-            unsafe { *out.add(i) = kernels::ntt_stage(i, sl(a, a_len), len as usize, sl(twiddles, twiddles_len), stride as usize) };
+            unsafe {
+                *out.add(i) = kernels::ntt_stage(
+                    i,
+                    sl(a, a_len),
+                    len as usize,
+                    sl(twiddles, twiddles_len),
+                    stride as usize,
+                )
+            };
         }
     }
 
@@ -211,7 +239,14 @@ pub mod groth16 {
         let b = thread::index_1d().get();
         if b < n as usize {
             // SAFETY: as above.
-            unsafe { *out.add(b) = kernels::bucket_sum(b, sl(points, points_len), sl(order, order_len), sl(starts, starts_len)) };
+            unsafe {
+                *out.add(b) = kernels::bucket_sum(
+                    b,
+                    sl(points, points_len),
+                    sl(order, order_len),
+                    sl(starts, starts_len),
+                )
+            };
         }
     }
 
@@ -230,7 +265,14 @@ pub mod groth16 {
         let b = thread::index_1d().get();
         if b < n as usize {
             // SAFETY: as above.
-            unsafe { *out.add(b) = kernels::bucket_sum(b, sl(points, points_len), sl(order, order_len), sl(starts, starts_len)) };
+            unsafe {
+                *out.add(b) = kernels::bucket_sum(
+                    b,
+                    sl(points, points_len),
+                    sl(order, order_len),
+                    sl(starts, starts_len),
+                )
+            };
         }
     }
 }

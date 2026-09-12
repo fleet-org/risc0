@@ -136,9 +136,35 @@ fn mont_mul(a: &[u64; 4], b: &[u64; 4], m: &[u64; 4], inv: u64) -> [u64; 4] {
 macro_rules! prime_field {
     ($name:ident, $doc:literal, $modulus:expr, $r:expr, $r2:expr, $inv:expr, $pm2:expr) => {
         #[doc = $doc]
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+        #[derive(Clone, Copy, Default)]
         #[repr(C)]
         pub struct $name([u64; 4]);
+
+        // `Hash` by hand too, over the same limbs, so it agrees with the hand-written `PartialEq`.
+        impl core::hash::Hash for $name {
+            #[inline]
+            fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+                self.0.hash(state);
+            }
+        }
+
+        // Not derived: a derived `PartialEq` on `[u64; 4]` lowers to the `raw_eq` intrinsic, which
+        // cuda-oxide's device backend does not support (MEASURED, C13). Limb-wise it is plain
+        // integer arithmetic — and branch-free, which the host is happy with too.
+        impl PartialEq for $name {
+            #[inline]
+            fn eq(&self, other: &Self) -> bool {
+                let mut acc = 0u64;
+                let mut i = 0;
+                while i < 4 {
+                    acc |= self.0[i] ^ other.0[i];
+                    i += 1;
+                }
+                acc == 0
+            }
+        }
+
+        impl Eq for $name {}
 
         impl $name {
             /// The modulus, little-endian limbs.

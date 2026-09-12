@@ -195,6 +195,12 @@ is an explicit _unavailable_, never a fallback); the harness gained `--features 
 `--features cuda-oxide` so both arms are selectable as the confirmed kind of a run. MEASURED:
 type-checks for `aarch64-apple-darwin` with `--features metal`; unrun (E3).
 
+**Landed (C13, the CUDA device module compiled without a GPU):** `groth16_s01/cuda-kernels` builds
+to PTX on the pinned cuda-oxide toolchain on the session box (`cargo oxide build --arch sm_89` and
+`sm_120`); `groth16_s01/scripts/ptx-check.sh` proves the ten kernels and their parameter layouts
+against the ABI and assembles the module with `ptxas` for both targets. MEASURED. The `ptx-c13`
+release carries the two PTX files. What remains for the CUDA host is the launches.
+
 Constraints this satisfies: the canonical path stays selectable on every build that has it
 (definition of done #2); selecting an unavailable backend is an error, never a silent fallback
 (three-state: _unavailable_ ≠ _failed_ ≠ _succeeded_); the harness (s01/5) runs canonical and
