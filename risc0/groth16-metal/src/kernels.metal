@@ -31,13 +31,15 @@ struct fe {
 
 static inline bool fe_is_zero(fe a) {
     uint acc = 0;
-    for (int i = 0; i < 8; ++i) acc |= a.v[i];
+    for (int i = 0; i < 8; ++i)
+        acc |= a.v[i];
     return acc == 0;
 }
 
 static inline bool fe_geq(thread const uint* a, constant uint* m) {
     for (int i = 7; i >= 0; --i) {
-        if (a[i] != m[i]) return a[i] > m[i];
+        if (a[i] != m[i])
+            return a[i] > m[i];
     }
     return true;
 }
@@ -59,7 +61,8 @@ static inline fe fe_add(fe a, fe b, constant uint* m) {
         r.v[i] = (uint)t;
         carry = t >> 32;
     }
-    if (carry != 0 || fe_geq(r.v, m)) fe_sub_mod(r.v, m);
+    if (carry != 0 || fe_geq(r.v, m))
+        fe_sub_mod(r.v, m);
     return r;
 }
 
@@ -83,7 +86,8 @@ static inline fe fe_sub(fe a, fe b, constant uint* m) {
 }
 
 static inline fe fe_neg(fe a, constant uint* m) {
-    if (fe_is_zero(a)) return a;
+    if (fe_is_zero(a))
+        return a;
     fe r;
     long borrow = 0;
     for (int i = 0; i < 8; ++i) {
@@ -97,7 +101,8 @@ static inline fe fe_neg(fe a, constant uint* m) {
 // Montgomery multiplication, CIOS with 32-bit limbs: a·b·R⁻¹ mod m, reduced.
 static inline fe fe_mul(fe a, fe b, constant uint* m, uint inv) {
     uint t[10];
-    for (int i = 0; i < 10; ++i) t[i] = 0;
+    for (int i = 0; i < 10; ++i)
+        t[i] = 0;
     for (int i = 0; i < 8; ++i) {
         ulong carry = 0;
         for (int j = 0; j < 8; ++j) {
@@ -127,39 +132,125 @@ static inline fe fe_mul(fe a, fe b, constant uint* m, uint inv) {
         }
     }
     fe r;
-    for (int i = 0; i < 8; ++i) r.v[i] = t[i];
-    if (t[8] != 0 || fe_geq(r.v, m)) fe_sub_mod(r.v, m);
+    for (int i = 0; i < 8; ++i)
+        r.v[i] = t[i];
+    if (t[8] != 0 || fe_geq(r.v, m))
+        fe_sub_mod(r.v, m);
     return r;
 }
 
 // ---------------------------------------------------------------- Fp, Fr, Fp2
 
-struct Fp { fe v; };
-struct Fr { fe v; };
-struct Fp2 { Fp c0, c1; };
+struct Fp {
+    fe v;
+};
+struct Fr {
+    fe v;
+};
+struct Fp2 {
+    Fp c0, c1;
+};
 
-static inline Fp fp_zero() { Fp r; for (int i = 0; i < 8; ++i) r.v.v[i] = 0; return r; }
-static inline Fp fp_one() { Fp r; for (int i = 0; i < 8; ++i) r.v.v[i] = FP_ONE[i]; return r; }
-static inline bool fp_is_zero(Fp a) { return fe_is_zero(a.v); }
-static inline Fp fp_add(Fp a, Fp b) { Fp r; r.v = fe_add(a.v, b.v, FP_MOD); return r; }
-static inline Fp fp_sub(Fp a, Fp b) { Fp r; r.v = fe_sub(a.v, b.v, FP_MOD); return r; }
-static inline Fp fp_mul(Fp a, Fp b) { Fp r; r.v = fe_mul(a.v, b.v, FP_MOD, FP_INV); return r; }
-static inline Fp fp_sqr(Fp a) { return fp_mul(a, a); }
-static inline Fp fp_dbl(Fp a) { return fp_add(a, a); }
-static inline Fp fp_neg(Fp a) { Fp r; r.v = fe_neg(a.v, FP_MOD); return r; }
+static inline Fp fp_zero() {
+    Fp r;
+    for (int i = 0; i < 8; ++i)
+        r.v.v[i] = 0;
+    return r;
+}
+static inline Fp fp_one() {
+    Fp r;
+    for (int i = 0; i < 8; ++i)
+        r.v.v[i] = FP_ONE[i];
+    return r;
+}
+static inline bool fp_is_zero(Fp a) {
+    return fe_is_zero(a.v);
+}
+static inline Fp fp_add(Fp a, Fp b) {
+    Fp r;
+    r.v = fe_add(a.v, b.v, FP_MOD);
+    return r;
+}
+static inline Fp fp_sub(Fp a, Fp b) {
+    Fp r;
+    r.v = fe_sub(a.v, b.v, FP_MOD);
+    return r;
+}
+static inline Fp fp_mul(Fp a, Fp b) {
+    Fp r;
+    r.v = fe_mul(a.v, b.v, FP_MOD, FP_INV);
+    return r;
+}
+static inline Fp fp_sqr(Fp a) {
+    return fp_mul(a, a);
+}
+static inline Fp fp_dbl(Fp a) {
+    return fp_add(a, a);
+}
+static inline Fp fp_neg(Fp a) {
+    Fp r;
+    r.v = fe_neg(a.v, FP_MOD);
+    return r;
+}
 
-static inline Fr fr_zero() { Fr r; for (int i = 0; i < 8; ++i) r.v.v[i] = 0; return r; }
-static inline Fr fr_add(Fr a, Fr b) { Fr r; r.v = fe_add(a.v, b.v, FR_MOD); return r; }
-static inline Fr fr_sub(Fr a, Fr b) { Fr r; r.v = fe_sub(a.v, b.v, FR_MOD); return r; }
-static inline Fr fr_mul(Fr a, Fr b) { Fr r; r.v = fe_mul(a.v, b.v, FR_MOD, FR_INV); return r; }
+static inline Fr fr_zero() {
+    Fr r;
+    for (int i = 0; i < 8; ++i)
+        r.v.v[i] = 0;
+    return r;
+}
+static inline Fr fr_add(Fr a, Fr b) {
+    Fr r;
+    r.v = fe_add(a.v, b.v, FR_MOD);
+    return r;
+}
+static inline Fr fr_sub(Fr a, Fr b) {
+    Fr r;
+    r.v = fe_sub(a.v, b.v, FR_MOD);
+    return r;
+}
+static inline Fr fr_mul(Fr a, Fr b) {
+    Fr r;
+    r.v = fe_mul(a.v, b.v, FR_MOD, FR_INV);
+    return r;
+}
 
-static inline Fp2 fp2_zero() { Fp2 r; r.c0 = fp_zero(); r.c1 = fp_zero(); return r; }
-static inline Fp2 fp2_one() { Fp2 r; r.c0 = fp_one(); r.c1 = fp_zero(); return r; }
-static inline bool fp2_is_zero(Fp2 a) { return fp_is_zero(a.c0) && fp_is_zero(a.c1); }
-static inline Fp2 fp2_add(Fp2 a, Fp2 b) { Fp2 r; r.c0 = fp_add(a.c0, b.c0); r.c1 = fp_add(a.c1, b.c1); return r; }
-static inline Fp2 fp2_sub(Fp2 a, Fp2 b) { Fp2 r; r.c0 = fp_sub(a.c0, b.c0); r.c1 = fp_sub(a.c1, b.c1); return r; }
-static inline Fp2 fp2_dbl(Fp2 a) { return fp2_add(a, a); }
-static inline Fp2 fp2_neg(Fp2 a) { Fp2 r; r.c0 = fp_neg(a.c0); r.c1 = fp_neg(a.c1); return r; }
+static inline Fp2 fp2_zero() {
+    Fp2 r;
+    r.c0 = fp_zero();
+    r.c1 = fp_zero();
+    return r;
+}
+static inline Fp2 fp2_one() {
+    Fp2 r;
+    r.c0 = fp_one();
+    r.c1 = fp_zero();
+    return r;
+}
+static inline bool fp2_is_zero(Fp2 a) {
+    return fp_is_zero(a.c0) && fp_is_zero(a.c1);
+}
+static inline Fp2 fp2_add(Fp2 a, Fp2 b) {
+    Fp2 r;
+    r.c0 = fp_add(a.c0, b.c0);
+    r.c1 = fp_add(a.c1, b.c1);
+    return r;
+}
+static inline Fp2 fp2_sub(Fp2 a, Fp2 b) {
+    Fp2 r;
+    r.c0 = fp_sub(a.c0, b.c0);
+    r.c1 = fp_sub(a.c1, b.c1);
+    return r;
+}
+static inline Fp2 fp2_dbl(Fp2 a) {
+    return fp2_add(a, a);
+}
+static inline Fp2 fp2_neg(Fp2 a) {
+    Fp2 r;
+    r.c0 = fp_neg(a.c0);
+    r.c1 = fp_neg(a.c1);
+    return r;
+}
 // (a0 + a1 u)(b0 + b1 u) = (a0 b0 − a1 b1) + (a0 b1 + a1 b0) u, u² = −1
 static inline Fp2 fp2_mul(Fp2 a, Fp2 b) {
     Fp2 r;
@@ -203,17 +294,38 @@ template <> struct Ops<Fp2> {
 
 // Affine points as stored by the zkey (Montgomery coordinates); the host
 // encodes the point at infinity as x = y = 0, which is off every curve here.
-template <typename F> struct Aff { F x, y; };
-template <typename F> struct Jac { F x, y, z; };  // infinity ⇔ z = 0
+template <typename F> struct Aff {
+    F x, y;
+};
+template <typename F> struct Jac {
+    F x, y, z;
+}; // infinity ⇔ z = 0
 
-template <typename F> static inline bool aff_is_inf(Aff<F> p) { return Ops<F>::is_zero(p.x) && Ops<F>::is_zero(p.y); }
-template <typename F> static inline bool jac_is_inf(Jac<F> p) { return Ops<F>::is_zero(p.z); }
-template <typename F> static inline Jac<F> jac_inf() { Jac<F> r; r.x = Ops<F>::one(); r.y = Ops<F>::one(); r.z = Ops<F>::zero(); return r; }
-template <typename F> static inline Jac<F> jac_from_aff(Aff<F> p) { Jac<F> r; r.x = p.x; r.y = p.y; r.z = Ops<F>::one(); return r; }
+template <typename F> static inline bool aff_is_inf(Aff<F> p) {
+    return Ops<F>::is_zero(p.x) && Ops<F>::is_zero(p.y);
+}
+template <typename F> static inline bool jac_is_inf(Jac<F> p) {
+    return Ops<F>::is_zero(p.z);
+}
+template <typename F> static inline Jac<F> jac_inf() {
+    Jac<F> r;
+    r.x = Ops<F>::one();
+    r.y = Ops<F>::one();
+    r.z = Ops<F>::zero();
+    return r;
+}
+template <typename F> static inline Jac<F> jac_from_aff(Aff<F> p) {
+    Jac<F> r;
+    r.x = p.x;
+    r.y = p.y;
+    r.z = Ops<F>::one();
+    return r;
+}
 
 // dbl-2009-l
 template <typename F> static inline Jac<F> jac_dbl(Jac<F> p) {
-    if (jac_is_inf(p)) return p;
+    if (jac_is_inf(p))
+        return p;
     F a = Ops<F>::sqr(p.x);
     F b = Ops<F>::sqr(p.y);
     F c = Ops<F>::sqr(b);
@@ -230,15 +342,18 @@ template <typename F> static inline Jac<F> jac_dbl(Jac<F> p) {
 
 // madd-2007-bl: Jacobian + affine (the bucket step)
 template <typename F> static inline Jac<F> jac_madd(Jac<F> p, Aff<F> q) {
-    if (aff_is_inf(q)) return p;
-    if (jac_is_inf(p)) return jac_from_aff(q);
+    if (aff_is_inf(q))
+        return p;
+    if (jac_is_inf(p))
+        return jac_from_aff(q);
     F z1z1 = Ops<F>::sqr(p.z);
     F u2 = Ops<F>::mul(q.x, z1z1);
     F s2 = Ops<F>::mul(Ops<F>::mul(q.y, p.z), z1z1);
     F h = Ops<F>::sub(u2, p.x);
     F rr = Ops<F>::dbl(Ops<F>::sub(s2, p.y));
     if (Ops<F>::is_zero(h)) {
-        if (Ops<F>::is_zero(rr)) return jac_dbl(p);
+        if (Ops<F>::is_zero(rr))
+            return jac_dbl(p);
         return jac_inf<F>();
     }
     F hh = Ops<F>::sqr(h);
@@ -278,34 +393,45 @@ kernel void scatter_group(device const GroupedCoeff* coeffs [[buffer(0)]],
     out[g] = sum;
 }
 
-kernel void pointwise_mul(device const Fr* a [[buffer(0)]], device const Fr* b [[buffer(1)]],
-                          device Fr* out [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+kernel void pointwise_mul(device const Fr* a [[buffer(0)]],
+                          device const Fr* b [[buffer(1)]],
+                          device Fr* out [[buffer(2)]],
+                          uint i [[thread_position_in_grid]]) {
     out[i] = fr_mul(a[i], b[i]);
 }
 
-kernel void pointwise_mul_sub(device const Fr* a [[buffer(0)]], device const Fr* b [[buffer(1)]],
-                              device const Fr* c [[buffer(2)]], device Fr* out [[buffer(3)]],
+kernel void pointwise_mul_sub(device const Fr* a [[buffer(0)]],
+                              device const Fr* b [[buffer(1)]],
+                              device const Fr* c [[buffer(2)]],
+                              device Fr* out [[buffer(3)]],
                               uint i [[thread_position_in_grid]]) {
     out[i] = fr_sub(fr_mul(a[i], b[i]), c[i]);
 }
 
 // out[i] = a[i] · table[i] · k   (coset shift powers and the 1/n of an inverse NTT in one pass)
-kernel void pointwise_scale(device const Fr* a [[buffer(0)]], device const Fr* table [[buffer(1)]],
-                            constant Fr& k [[buffer(2)]], device Fr* out [[buffer(3)]],
+kernel void pointwise_scale(device const Fr* a [[buffer(0)]],
+                            device const Fr* table [[buffer(1)]],
+                            constant Fr& k [[buffer(2)]],
+                            device Fr* out [[buffer(3)]],
                             uint i [[thread_position_in_grid]]) {
     out[i] = fr_mul(fr_mul(a[i], table[i]), k);
 }
 
-kernel void bit_reverse(device const Fr* a [[buffer(0)]], constant uint& lg_n [[buffer(1)]],
-                        device Fr* out [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+kernel void bit_reverse(device const Fr* a [[buffer(0)]],
+                        constant uint& lg_n [[buffer(1)]],
+                        device Fr* out [[buffer(2)]],
+                        uint i [[thread_position_in_grid]]) {
     uint j = reverse_bits(i) >> (32u - lg_n);
     out[i] = a[j];
 }
 
 // One radix-2 Cooley–Tukey stage, out of place (see the Rust twin).
-kernel void ntt_stage(device const Fr* a [[buffer(0)]], constant uint& len [[buffer(1)]],
-                      device const Fr* tw [[buffer(2)]], constant uint& stride [[buffer(3)]],
-                      device Fr* out [[buffer(4)]], uint i [[thread_position_in_grid]]) {
+kernel void ntt_stage(device const Fr* a [[buffer(0)]],
+                      constant uint& len [[buffer(1)]],
+                      device const Fr* tw [[buffer(2)]],
+                      constant uint& stride [[buffer(3)]],
+                      device Fr* out [[buffer(4)]],
+                      uint i [[thread_position_in_grid]]) {
     uint hl = len / 2;
     uint k = i % len;
     if (k < hl) {
@@ -320,8 +446,10 @@ kernel void ntt_stage(device const Fr* a [[buffer(0)]], constant uint& len [[buf
 }
 
 // The w-bit digit `window` of canonical scalar i (8 little-endian 32-bit limbs).
-kernel void digits(device const uint* scalars [[buffer(0)]], constant uint& window [[buffer(1)]],
-                   constant uint& w [[buffer(2)]], device uint* out [[buffer(3)]],
+kernel void digits(device const uint* scalars [[buffer(0)]],
+                   constant uint& window [[buffer(1)]],
+                   constant uint& w [[buffer(2)]],
+                   device uint* out [[buffer(3)]],
                    uint i [[thread_position_in_grid]]) {
     uint bit = window * w;
     uint limb = bit / 32u;
@@ -336,18 +464,24 @@ kernel void digits(device const uint* scalars [[buffer(0)]], constant uint& wind
     out[i] = d & ((1u << w) - 1u);
 }
 
-kernel void bucket_sum_g1(device const Aff<Fp>* points [[buffer(0)]], device const uint* order [[buffer(1)]],
-                          device const uint* starts [[buffer(2)]], device Jac<Fp>* out [[buffer(3)]],
+kernel void bucket_sum_g1(device const Aff<Fp>* points [[buffer(0)]],
+                          device const uint* order [[buffer(1)]],
+                          device const uint* starts [[buffer(2)]],
+                          device Jac<Fp>* out [[buffer(3)]],
                           uint b [[thread_position_in_grid]]) {
     Jac<Fp> acc = jac_inf<Fp>();
-    for (uint k = starts[b]; k < starts[b + 1]; ++k) acc = jac_madd(acc, points[order[k]]);
+    for (uint k = starts[b]; k < starts[b + 1]; ++k)
+        acc = jac_madd(acc, points[order[k]]);
     out[b] = acc;
 }
 
-kernel void bucket_sum_g2(device const Aff<Fp2>* points [[buffer(0)]], device const uint* order [[buffer(1)]],
-                          device const uint* starts [[buffer(2)]], device Jac<Fp2>* out [[buffer(3)]],
+kernel void bucket_sum_g2(device const Aff<Fp2>* points [[buffer(0)]],
+                          device const uint* order [[buffer(1)]],
+                          device const uint* starts [[buffer(2)]],
+                          device Jac<Fp2>* out [[buffer(3)]],
                           uint b [[thread_position_in_grid]]) {
     Jac<Fp2> acc = jac_inf<Fp2>();
-    for (uint k = starts[b]; k < starts[b + 1]; ++k) acc = jac_madd(acc, points[order[k]]);
+    for (uint k = starts[b]; k < starts[b + 1]; ++k)
+        acc = jac_madd(acc, points[order[k]]);
     out[b] = acc;
 }

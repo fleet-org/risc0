@@ -1,7 +1,8 @@
 # The CUDA arm's DEVICE module (GROTH16 s01/4): `#[kernel]` wrappers around the per-index bodies of
 # risc0-groth16-oxide, compiled by NVlabs/cuda-oxide (`cargo oxide build`, run in this directory) to
 # `risc0_groth16_cuda_kernels.ptx` beside this file (or into $CUDA_OXIDE_PTX_DIR). Not a workspace
-# member (root Cargo.toml `exclude`; needs cuda-oxide's nightly + rustc backend), never compiled by CI.
+# member (root Cargo.toml `exclude`; needs cuda-oxide's nightly + rustc backend), never compiled
+# by CI.
 # On the pinned nightly it type-checks with plain `cargo check` and no CUDA toolkit. See README.md.
 [package]
 name = "risc0-groth16-cuda-kernels"
@@ -15,9 +16,18 @@ publish = false
 [dependencies]
 risc0-groth16-core = { path = "../../risc0/groth16-core", default-features = false }
 risc0-groth16-oxide = { path = "../../risc0/groth16-oxide", default-features = false }
-# Pinned at groth16_s01/CUDA_OXIDE_PIN.md §2; both are git-only. `cuda-device` re-exports the macros;
-# `cuda-macros` is listed only to pin `default-features = false`: its default `host` feature makes the
-# macros emit `::cuda_host` loaders/launchers (cuda-host -> cuda-core -> cuda-bindings -> cuda.h), E0433
+# Pinned at groth16_s01/CUDA_OXIDE_PIN.md §2; both are git-only. `cuda-device` re-exports the
+# macros;
+# `cuda-macros` is listed only to pin `default-features = false`: its default `host` feature
+# makes the
+# macros emit `::cuda_host` loaders/launchers (cuda-host -> cuda-core -> cuda-bindings ->
+# cuda.h), E0433
 # here (cuda-oxide crates/cuda-macros/Cargo.toml, tests/device-only/Cargo.toml).
-cuda-device = { git = "https://github.com/NVlabs/cuda-oxide", rev = "6abfaa091e29a6275c1943895bfbc97efa306e98" }
-cuda-macros = { git = "https://github.com/NVlabs/cuda-oxide", rev = "6abfaa091e29a6275c1943895bfbc97efa306e98", default-features = false }
+[dependencies.cuda-device]
+git = "https://github.com/NVlabs/cuda-oxide"
+rev = "6abfaa091e29a6275c1943895bfbc97efa306e98"
+
+[dependencies.cuda-macros]
+git = "https://github.com/NVlabs/cuda-oxide"
+rev = "6abfaa091e29a6275c1943895bfbc97efa306e98"
+default-features = false

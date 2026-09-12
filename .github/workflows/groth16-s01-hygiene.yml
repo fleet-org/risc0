@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # the range and license-check.py need history
+          fetch-depth: 0 # the range and license-check.py need history
       - name: Toolchain (pinned by rust-toolchain.toml) with rustfmt and clippy
         run: |
           rustup show active-toolchain
@@ -50,6 +50,10 @@ jobs:
         run: cargo install cargo-sort --version '^1.0' --locked
       - name: CUDA 13 headers (clippy on the CUDA arm's host crate needs cuda-bindings to build)
         run: groth16_s01/scripts/cuda-headers.sh "$RUNNER_TEMP/cuda" >> "$GITHUB_ENV"
+      - name: Formatters, one per file type (prettier, shfmt, shellcheck, taplo, clang-format)
+        run: |
+          groth16_s01/scripts/fmt/install.sh "$HOME/bin"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
       - name: Metal shaders parse as C++14 against the stub, reserved type names poisoned
         run: |
           groth16_s01/scripts/msl-check.sh --self-test
@@ -57,10 +61,12 @@ jobs:
       - name: precommit.sh on the range
         env:
           GH_TOKEN: ${{ github.token }}
-          PRECOMMIT_HARNESS_CLIPPY: "1"
+          PRECOMMIT_HARNESS_CLIPPY: '1'
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
-            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+            range="$PR_BASE..$PR_HEAD"
           else
             range="${{ github.event.before }}..${{ github.sha }}"
           fi

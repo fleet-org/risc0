@@ -3,24 +3,38 @@
 # way `risc0_groth16_metal::MSL_SOURCE` does and compile them as C++14 against a stub <metal_stdlib>
 # (msl-stub/, force-included: consts.metal precedes the shader's own #include, as MSL allows), with
 # MSL's built-in type names poisoned so that using one as an identifier is an error.
-# Catches: C++-level syntax errors, undeclared names, and reserved-type-name identifiers (I-G16-019).
+# Catches: C++ syntax errors, undeclared names, and reserved-type-name identifiers (I-G16-019).
 # Does not catch: anything semantic (address spaces, attribute meaning, arithmetic).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 CXX=${CXX:-g++}
 stub=groth16_s01/scripts/msl-stub
+parse() {
+  "$CXX" -std=c++14 -x c++ -fsyntax-only -isystem "$stub" -include "$stub/metal_stdlib" "$@"
+}
 if [ "${1:-}" = --self-test ]; then
   # the check must have teeth: a poisoned name used as an identifier is an error
-  if printf 'uint half = 1;\n' | "$CXX" -std=c++14 -x c++ -fsyntax-only -isystem "$stub" -include "$stub/metal_stdlib" - 2>/dev/null; then
-    echo "msl-check self-test: FAILED — 'uint half = 1;' was accepted" >&2; exit 1
+  if printf 'uint half = 1;\n' | parse - 2> /dev/null; then
+    echo "msl-check self-test: FAILED — 'uint half = 1;' was accepted" >&2
+    exit 1
   fi
-  echo "msl-check self-test: ok (a reserved MSL type name used as an identifier is rejected)"; exit 0
+  echo "msl-check self-test: ok (a reserved MSL type name used as an identifier is rejected)"
+  exit 0
 fi
-src=$(mktemp --suffix=.cpp); trap 'rm -f "$src"' EXIT
-{ cat risc0/groth16-metal/src/consts.metal; echo; cat risc0/groth16-metal/src/kernels.metal; } > "$src"
-if "$CXX" -std=c++14 -x c++ -fsyntax-only -isystem groth16_s01/scripts/msl-stub -include groth16_s01/scripts/msl-stub/metal_stdlib -Wno-attributes -Wno-unused "$src" 2> "$src.err"; then
-  echo "msl-check: ok (consts.metal + kernels.metal parse as C++14 against the stub; no poisoned name used)"
+src=$(mktemp --suffix=.cpp)
+trap 'rm -f "$src"' EXIT
+{
+  cat risc0/groth16-metal/src/consts.metal
+  echo
+  cat risc0/groth16-metal/src/kernels.metal
+} > "$src"
+if parse -Wno-attributes -Wno-unused "$src" 2> "$src.err"; then
+  echo "msl-check: ok (consts.metal + kernels.metal parse as C++14 against the stub;" \
+    "no poisoned name used)"
 else
-  echo "msl-check: FAILED" >&2; sed "s#$src#kernels.metal(+consts)#g" "$src.err" | head -20 >&2; rm -f "$src.err"; exit 1
+  echo "msl-check: FAILED" >&2
+  sed "s#$src#kernels.metal(+consts)#g" "$src.err" | head -20 >&2
+  rm -f "$src.err"
+  exit 1
 fi
 rm -f "$src.err"
