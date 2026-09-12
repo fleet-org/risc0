@@ -1,0 +1,22 @@
+[package]
+name = "risc0-groth16-core"
+description = "Shared BN254 arithmetic, NTT/MSM and artifact formats for the GROTH16 s01 prover arms (cuda-oxide, Metal, CPU reference)"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+ark-bn254 = "0.5.0"
+ark-ec = "0.5.0"
+ark-ff = "0.5.0"
+ark-groth16 = { version = "0.5.0", default-features = false }
+ark-poly = "0.5.0"
+
+[features]
+default = ["std"]
+std = []

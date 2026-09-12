@@ -12,4 +12,4 @@ Base branch `integration/staging-platform` = upstream tag `v3.0.4` (`d7ee368e`),
 
 Code lands under `risc0/groth16-sys/` (boundary trait + backends) and, later, `groth16_s01/harness/` (s01/5). Every issue reference is repo-qualified; every source link is a full-SHA permalink.
 
-**Status:** C3 — the boundary module `risc0/groth16-sys/src/backend.rs` (`Groth16Backend`, `BackendKind`, `Registry`, `RISC0_GROTH16_BACKEND`) with the canonical backend registered under `cuda`; CI in `.github/workflows/groth16-s01.yml`.
+**Status:** C4 — `risc0/groth16-core` (shared `no_std` arithmetic, NTT, MSM, zkey/wtns formats, reference prover; every module conformance-tested against arkworks) and the `reference` backend in `risc0-groth16-sys`, verified end-to-end on the in-tree fixture. C3 — the boundary module `risc0/groth16-sys/src/backend.rs` (`Groth16Backend`, `BackendKind`, `Registry`, `RISC0_GROTH16_BACKEND`) with the canonical backend registered under `cuda`; CI in `.github/workflows/groth16-s01.yml`.

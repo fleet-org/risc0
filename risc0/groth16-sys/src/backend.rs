@@ -66,14 +66,19 @@ pub enum BackendKind {
     CudaOxide,
     /// The Metal (MSL) rewrite for Apple Silicon (GROTH16 s01/4b).
     Metal,
+    /// The CPU reference prover (`risc0-groth16-core`): the arms' shared
+    /// arithmetic run on the host. For tests and the differential harness —
+    /// never the default, not a production path.
+    Reference,
 }
 
 impl BackendKind {
     /// Every kind, in a stable order.
-    pub const ALL: [BackendKind; 3] = [
+    pub const ALL: [BackendKind; 4] = [
         BackendKind::Canonical,
         BackendKind::CudaOxide,
         BackendKind::Metal,
+        BackendKind::Reference,
     ];
 
     /// The kind used when [`BACKEND_ENV`] is absent.
@@ -85,6 +90,7 @@ impl BackendKind {
             BackendKind::Canonical => "canonical",
             BackendKind::CudaOxide => "cuda-oxide",
             BackendKind::Metal => "metal",
+            BackendKind::Reference => "reference",
         }
     }
 
@@ -245,8 +251,13 @@ pub fn compiled_in() -> Registry {
     let registry = Registry::new();
     #[cfg(feature = "cuda")]
     let registry = registry.with(Box::new(canonical::Canonical));
+    #[cfg(feature = "reference")]
+    let registry = registry.with(Box::new(reference::Reference));
     registry
 }
+
+#[cfg(feature = "reference")]
+pub mod reference;
 
 #[cfg(feature = "cuda")]
 mod canonical {
@@ -352,6 +363,10 @@ mod tests {
             BackendKind::CudaOxide
         );
         assert_eq!(BackendKind::parse("Metal\n").unwrap(), BackendKind::Metal);
+        assert_eq!(
+            BackendKind::parse("reference").unwrap(),
+            BackendKind::Reference
+        );
         for kind in BackendKind::ALL {
             assert_eq!(BackendKind::parse(kind.name()).unwrap(), kind);
             assert_eq!(kind.to_string(), kind.name());
@@ -425,15 +440,17 @@ mod tests {
 
     #[test]
     fn compiled_in_registers_exactly_the_cfg_backends() {
-        let expected: Vec<BackendKind> = if cfg!(feature = "cuda") {
-            vec![BackendKind::Canonical]
-        } else {
-            vec![]
-        };
+        let mut expected: Vec<BackendKind> = vec![];
+        if cfg!(feature = "cuda") {
+            expected.push(BackendKind::Canonical);
+        }
+        if cfg!(feature = "reference") {
+            expected.push(BackendKind::Reference);
+        }
         assert_eq!(compiled_in().available(), expected);
     }
 
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(not(any(feature = "cuda", feature = "reference")))]
     #[test]
     fn a_build_without_backends_reports_unavailable_rather_than_answering() {
         let err = compiled_in().select(None).unwrap_err();
