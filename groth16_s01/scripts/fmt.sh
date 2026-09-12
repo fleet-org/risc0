@@ -19,9 +19,10 @@ case "$mode" in --check | --fix) ;; *)
 esac
 cfg=groth16_s01/scripts/fmt
 if [ $# -eq 0 ]; then
-  mapfile -t files < <(git ls-files 'groth16_s01/*' 'handoffs/*' 'risc0/groth16-core/*' \
-    'risc0/groth16-oxide/*' 'risc0/groth16-cuda/*' 'risc0/groth16-metal/*' 'risc0/groth16-sys/*' \
-    '.github/workflows/groth16-s01*.yml')
+  # tracked AND untracked (a report the harness just wrote is a file to format too)
+  mapfile -t files < <(git ls-files --cached --others --exclude-standard 'groth16_s01/*' \
+    'handoffs/*' 'risc0/groth16-core/*' 'risc0/groth16-oxide/*' 'risc0/groth16-cuda/*' \
+    'risc0/groth16-metal/*' 'risc0/groth16-sys/*' '.github/workflows/groth16-s01*.yml')
 else
   files=("$@")
 fi

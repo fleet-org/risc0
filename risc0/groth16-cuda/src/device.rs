@@ -58,6 +58,37 @@ fn as_dev<T>(s: &[T]) -> &[Dev<T>] {
     unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<Dev<T>>(), s.len()) }
 }
 
+/// Per-phase wall-clock on stderr when `RISC0_GROTH16_TIMING` is set — what
+/// a GPU window should produce besides a total: where the seconds go.
+struct Phase {
+    enabled: bool,
+    start: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl Phase {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            enabled: std::env::var_os("RISC0_GROTH16_TIMING").is_some(),
+            start: now,
+            last: now,
+        }
+    }
+
+    fn mark(&mut self, what: &str) {
+        if self.enabled {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "[groth16-cuda] {what:<28} {:>8.3} s  (t = {:.3} s)",
+                (now - self.last).as_secs_f64(),
+                (now - self.start).as_secs_f64()
+            );
+            self.last = now;
+        }
+    }
+}
+
 /// One kernel parameter, as the ABI passes it.
 #[derive(Clone, Copy)]
 enum Arg {
@@ -289,7 +320,9 @@ impl CudaProver {
         )?;
         let digits = self.read(&digits_b)?;
         drop((digits_b, canonical_b));
+        let mut phase = Phase::new();
         let (order, starts) = sort_all_windows(&digits, n, buckets);
+        phase.mark("  msm: host sort");
         if order.is_empty() {
             return Ok(Jacobian::INFINITY);
         }
@@ -303,7 +336,60 @@ impl CudaProver {
             &[&slice(points)[..], &slice(&order_b), &slice(&starts_b)].concat(),
         )?;
         let sums = self.read(&sums_b)?;
-        Ok(horner(&reduce_all_windows(&sums, buckets), w))
+        phase.mark("  msm: bucket sums + read");
+        let result = horner(&reduce_all_windows(&sums, buckets), w);
+        phase.mark("  msm: reduce + Horner");
+        Ok(result)
+    }
+
+    /// [`Self::prepare`] for a zkey the caller owns: every point set and the
+    /// coefficient groups are uploaded and DROPPED one after another, so the
+    /// parsed and the uploaded copies never coexist in host memory (the
+    /// production zkey parses to ≈ 4 GB; the backends own it, so they use
+    /// this).
+    pub fn prepare_owned(
+        &self,
+        mut zkey: Zkey,
+        mut groups: CoefficientGroups,
+    ) -> Result<ResidentZkey> {
+        let n = zkey.domain_size;
+        let t = Tables::new(n);
+        let tb = TransformBuffers {
+            forward: self.upload(&t.forward)?,
+            inverse: self.upload(&t.inverse)?,
+            shift: self.upload(&t.shift_powers)?,
+        };
+        let meta = strip(&zkey);
+        let a_constraint = std::mem::take(&mut groups.a_constraint);
+        let b_constraint = std::mem::take(&mut groups.b_constraint);
+        let ca = self.upload(&std::mem::take(&mut groups.a))?;
+        let sa = self.upload(&std::mem::take(&mut groups.a_starts))?;
+        let cb = self.upload(&std::mem::take(&mut groups.b))?;
+        let sb = self.upload(&std::mem::take(&mut groups.b_starts))?;
+        drop(groups);
+        let pa = self.upload(&std::mem::take(&mut zkey.a))?;
+        let pb1 = self.upload(&std::mem::take(&mut zkey.b1))?;
+        let pc = self.upload(&std::mem::take(&mut zkey.c))?;
+        let ph = self.upload(&std::mem::take(&mut zkey.h))?;
+        let pb2 = self.upload(&std::mem::take(&mut zkey.b2))?;
+        drop(zkey);
+        Ok(ResidentZkey {
+            meta,
+            a_constraint,
+            b_constraint,
+            ca,
+            sa,
+            cb,
+            sb,
+            n_inv: t.n_inv,
+            lg_n: t.lg_n,
+            tb,
+            pa,
+            pb1,
+            pc,
+            ph,
+            pb2,
+        })
     }
 
     /// Produce a proof: the arm's implementation of the boundary.
@@ -381,7 +467,9 @@ impl CudaProver {
             return Err(ProveError::WitnessConstant.into());
         }
         let n = zkey.domain_size;
+        let mut phase = Phase::new();
         let witness_b = self.upload(witness)?;
+        phase.mark("witness upload");
         // scatter A and B (group sums on the device), placed at their constraint
         // indices on the host
         let scatter =
@@ -402,6 +490,7 @@ impl CudaProver {
             };
         let a_poly = scatter(&z.ca, &z.sa, &z.a_constraint)?;
         let b_poly = scatter(&z.cb, &z.sb, &z.b_constraint)?;
+        phase.mark("scatter A, B (+ placement)");
         let (a1, a2) = (self.upload(&a_poly)?, self.alloc::<Fr>(n)?);
         let (b1, b2) = (self.upload(&b_poly)?, self.alloc::<Fr>(n)?);
         let (c1, c2) = (self.alloc::<Fr>(n)?, self.alloc::<Fr>(n)?);
@@ -416,6 +505,7 @@ impl CudaProver {
             lg_n: z.lg_n,
             tb: &z.tb,
         };
+        phase.mark("polynomial uploads, C = A∘B");
         let ac = self.h_to_coset(&a1, &a2, n, &coset)?;
         let bc = self.h_to_coset(&b1, &b2, n, &coset)?;
         let cc = self.h_to_coset(&c1, &c2, n, &coset)?;
@@ -427,17 +517,24 @@ impl CudaProver {
             &[&slice(ac)[..], &slice(bc), &slice(cc)].concat(),
         )?;
         let quotient = self.read(&q)?;
+        phase.mark("3 coset transforms, quotient");
         // free the per-proof polynomial buffers (7 × n × 32 B) before the MSMs
         drop((a1, a2, b1, b2, c1, c2, q));
         let private = &witness[zkey.num_public + 1..];
-        let msms = Msms {
-            h: self.msm(abi::BUCKET_SUM_G1, &z.ph, &quotient)?,
-            a: self.msm(abi::BUCKET_SUM_G1, &z.pa, witness)?,
-            b1: self.msm(abi::BUCKET_SUM_G1, &z.pb1, witness)?,
-            b2: self.msm::<Fp2>(abi::BUCKET_SUM_G2, &z.pb2, witness)?,
-            c: self.msm(abi::BUCKET_SUM_G1, &z.pc, private)?,
-        };
-        Ok(assemble(zkey, &msms, r, s))
+        let h = self.msm(abi::BUCKET_SUM_G1, &z.ph, &quotient)?;
+        phase.mark("MSM h (G1)");
+        let a = self.msm(abi::BUCKET_SUM_G1, &z.pa, witness)?;
+        phase.mark("MSM a (G1)");
+        let b1 = self.msm(abi::BUCKET_SUM_G1, &z.pb1, witness)?;
+        phase.mark("MSM b1 (G1)");
+        let b2 = self.msm::<Fp2>(abi::BUCKET_SUM_G2, &z.pb2, witness)?;
+        phase.mark("MSM b2 (G2)");
+        let c = self.msm(abi::BUCKET_SUM_G1, &z.pc, private)?;
+        phase.mark("MSM c (G1)");
+        let msms = Msms { h, a, b1, b2, c };
+        let proof = assemble(zkey, &msms, r, s);
+        phase.mark("assembly");
+        Ok(proof)
     }
 }
 

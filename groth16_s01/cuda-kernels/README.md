@@ -19,7 +19,9 @@ cargo oxide setup                             # builds the codegen backend once 
 cargo oxide build --arch sm_89                # RTX 4090; `--arch sm_120` for the fleet's prover nodes
 cd ../.. && groth16_s01/scripts/ptx-check.sh  # kernels + parameter layouts vs the ABI; ptxas for sm_89, sm_120
 
-# STAGE 2 — on the CUDA host: launch
+# STAGE 2 — on the CUDA host: launch (on a shared device, check it is quiet first; see HARNESS.md)
+groth16_s01/scripts/gpu-free.py 5 2 || echo "not quiet: a production-sized run can fail either tenant"
+export RISC0_GROTH16_TIMING=1                # per-phase wall-clock on stderr
 export RISC0_GROTH16_CUDA_MODULE=$PWD/groth16_s01/cuda-kernels/risc0_groth16_cuda_kernels.ptx
 cargo run -p risc0-groth16-cuda --bin groth16-cuda-kernel-check   # every kernel, the MSM, a fixture proof
 RISC0_GROTH16_BACKEND=cuda-oxide cargo test -p risc0-groth16-sys --features cuda-oxide
