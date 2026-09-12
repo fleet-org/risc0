@@ -21,6 +21,9 @@ Code map:
 | `risc0/groth16-core` | shared `no_std` arithmetic (Fp/Fr/Fp2, G1/G2), NTT, MSM, zkey/wtns formats, the prover pipeline and assembly, the arms' shared helpers | conformance vs arkworks; fixture proof verifies |
 | `risc0/groth16-oxide` | the CUDA arm's kernel bodies as plain Rust + a launcher seam (`CpuLauncher` proves them; the cuda-oxide `#[cuda_module]` launcher is the device one) | byte-identical proof to core for fixed blinding; real-circuit run through the harness as `oxide-cpu` |
 | `risc0/groth16-metal` | the Metal arm: MSL kernels mirroring the oxide bodies, host pipeline on `metal` 0.29, records packed from core types | record-layout tests; darwin type-check in CI; GPU execution needs a Mac (E3) |
+| `risc0/groth16-cuda` | the CUDA arm's host side: loads the cuda-oxide device module via `cuda-core`, runs the pipeline on device buffers, `groth16-cuda-kernel-check`; type-checks without a GPU (CUDA headers only) | `BackendKind::CudaOxide` under feature `cuda-oxide`; device half pending E2 |
+| `groth16_s01/cuda-kernels` | the device half: `#[kernel]` wrappers around the oxide bodies to the shared ABI (`risc0_groth16_oxide::abi`); built by `cargo oxide` on a CUDA host only (excluded from the workspace) | template — two UNVERIFIED points named in its `lib.rs` |
+| `groth16_s01/scripts` | `precommit.sh` (the commit gate: hooks, CI, humans) · `cuda-headers.sh` (rootless CUDA 13 headers for GPU-less type-checks) | |
 | `groth16_s01/harness` | s01/5 | run on the real circuit (see HARNESS.md) |
 
 Every issue reference is repo-qualified; every source link is a full-SHA permalink.

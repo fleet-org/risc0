@@ -1,0 +1,4 @@
+# cuda-oxide's pin at the milestone's SHA (groth16_s01/CUDA_OXIDE_PIN.md §2).
+[toolchain]
+channel = "nightly-2026-08-28"
+components = ["rust-src", "rustc-dev", "llvm-tools"]

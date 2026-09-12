@@ -18,6 +18,7 @@ members = [
   "risc0/core",
   "risc0/groth16",
   "risc0/groth16-core",
+  "risc0/groth16-cuda",
   "risc0/groth16-metal",
   "risc0/groth16-oxide",
   "risc0/groth16-sys",
@@ -37,7 +38,9 @@ members = [
   "website/doc-test/main",
   "xtask",
 ]
-exclude = ["tools/crates-validator"]
+# groth16_s01/cuda-kernels is the CUDA arm's device module: built by `cargo oxide` on a CUDA host
+# (nightly + PTX backend), never by this workspace.
+exclude = ["groth16_s01/cuda-kernels", "tools/crates-validator"]
 
 [workspace.package]
 version = "3.0.0"

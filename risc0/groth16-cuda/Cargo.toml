@@ -1,0 +1,21 @@
+[package]
+name = "risc0-groth16-cuda"
+description = "GROTH16 s01/4 — host side of the CUDA arm: loads the cuda-oxide device module and runs the Groth16 prover pipeline on it"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+publish = false
+
+[[bin]]
+name = "groth16-cuda-kernel-check"
+path = "src/bin/kernel-check.rs"
+
+[dependencies]
+anyhow = "1"
+# The published host runtime of NVlabs/cuda-oxide (driver API; dlopens libcuda at run time; needs only
+# the CUDA 13 headers at build time — groth16_s01/scripts/cuda-headers.sh fetches them rootless).
+cuda-core = "=0.3.1"
+risc0-groth16-core = { path = "../groth16-core" }
+risc0-groth16-oxide = { path = "../groth16-oxide" }

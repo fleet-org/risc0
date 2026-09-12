@@ -150,8 +150,9 @@ impl MetalProver {
         cmd.wait_until_completed();
     }
 
-    /// Evaluations on H (in `a`) → evaluations on the coset, through the kernels;
-    /// `a`, `b` are ping-pong buffers of `n` elements. Returns the buffer holding the result.
+    /// The coset transform, executing [`risc0_groth16_oxide::schedule::coset`]
+    /// over the two buffers: the schedule names the buffer each launch reads
+    /// and writes, and the one holding the result.
     fn h_to_coset<'b>(
         &self,
         a: &'b Buffer,
@@ -160,75 +161,57 @@ impl MetalProver {
         t: &Tables,
         tb: &TransformBuffers,
     ) -> &'b Buffer {
-        let (fwd, inv, shift) = (&tb.forward, &tb.inverse, &tb.shift);
+        use risc0_groth16_oxide::schedule::{Buf, Step, Twiddles};
+        let pick = |which: Buf| match which {
+            Buf::A => a,
+            Buf::B => b,
+        };
         let lg = t.lg_n.to_le_bytes();
-        // inverse NTT
-        self.run(
-            "bit_reverse",
-            n,
-            &[Arg::Buf(a), Arg::Bytes(&lg), Arg::Buf(b)],
-        );
-        let mut in_b = true;
-        let mut len = 2usize;
-        while len <= n {
-            let (src, dst) = if in_b { (b, a) } else { (a, b) };
-            self.run(
-                "ntt_stage",
-                n,
-                &[
-                    Arg::Buf(src),
-                    Arg::Bytes(&(len as u32).to_le_bytes()),
-                    Arg::Buf(inv),
-                    Arg::Bytes(&((n / len) as u32).to_le_bytes()),
-                    Arg::Buf(dst),
-                ],
-            );
-            in_b = !in_b;
-            len <<= 1;
-        }
-        let (src, dst) = if in_b { (b, a) } else { (a, b) };
-        // coefficients · n⁻¹ · shift^i
         let n_inv = pack::fr_bytes(&t.n_inv);
-        self.run(
-            "pointwise_scale",
-            n,
-            &[
-                Arg::Buf(src),
-                Arg::Buf(shift),
-                Arg::Bytes(&n_inv),
-                Arg::Buf(dst),
-            ],
-        );
-        let (a2, b2) = if in_b { (a, b) } else { (b, a) };
-        // forward NTT from dst
-        self.run(
-            "bit_reverse",
-            n,
-            &[Arg::Buf(b2), Arg::Bytes(&lg), Arg::Buf(a2)],
-        );
-        let mut in_a = true;
-        let mut len = 2usize;
-        while len <= n {
-            let (src, dst) = if in_a { (a2, b2) } else { (b2, a2) };
-            self.run(
-                "ntt_stage",
-                n,
-                &[
-                    Arg::Buf(src),
-                    Arg::Bytes(&(len as u32).to_le_bytes()),
-                    Arg::Buf(fwd),
-                    Arg::Bytes(&((n / len) as u32).to_le_bytes()),
-                    Arg::Buf(dst),
-                ],
-            );
-            in_a = !in_a;
-            len <<= 1;
+        let sched = risc0_groth16_oxide::schedule::coset(n as u32);
+        for step in &sched.steps {
+            let (src, dst) = (pick(step.src()), pick(step.dst()));
+            match *step {
+                Step::BitReverse { .. } => self.run(
+                    "bit_reverse",
+                    n,
+                    &[Arg::Buf(src), Arg::Bytes(&lg), Arg::Buf(dst)],
+                ),
+                Step::NttStage {
+                    len,
+                    stride,
+                    twiddles,
+                    ..
+                } => {
+                    let tw = match twiddles {
+                        Twiddles::Inverse => &tb.inverse,
+                        Twiddles::Forward => &tb.forward,
+                    };
+                    self.run(
+                        "ntt_stage",
+                        n,
+                        &[
+                            Arg::Buf(src),
+                            Arg::Bytes(&len.to_le_bytes()),
+                            Arg::Buf(tw),
+                            Arg::Bytes(&stride.to_le_bytes()),
+                            Arg::Buf(dst),
+                        ],
+                    )
+                }
+                Step::Scale { .. } => self.run(
+                    "pointwise_scale",
+                    n,
+                    &[
+                        Arg::Buf(src),
+                        Arg::Buf(&tb.shift),
+                        Arg::Bytes(&n_inv),
+                        Arg::Buf(dst),
+                    ],
+                ),
+            }
         }
-        if in_a {
-            a2
-        } else {
-            b2
-        }
+        pick(sched.result)
     }
 
     /// One MSM: digits on the device, counting sort on the host, bucket sums on

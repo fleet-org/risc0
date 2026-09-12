@@ -71,3 +71,10 @@ Apache-2.0 (NVlabs). The repository ships `deny.toml` (allowlist: MIT, Apache-2.
 5. **Coexistence with risc0's cudart HAL** in one agent process is UNVERIFIED and is the second thing to prove on that host.
 
 If (4) or (5) fails on the host, the fallback that preserves the milestone's substitutability goal is the LTOIR hybrid (Rust kernels + sppark device functions), which should then be reported as a finding rather than adopted silently.
+
+## Addendum (C8) — what a GPU-less session could verify, MEASURED 2026-09-12
+
+- The published host runtime `cuda-core` 0.3.1 (with `cuda-bindings` 0.3.1) **type-checks without a GPU or toolkit** given only the CUDA 13.0 headers: `cuda-driver-dev`, `cuda-cudart-dev`, `cuda-crt`, `cuda-cccl` and `libcurand-dev` (its `wrapper.h` includes `curand.h`), 154 MB extracted rootless from NVIDIA's Ubuntu 24.04 repository by `groth16_s01/scripts/cuda-headers.sh`. `cuda-bindings` needs `CUDA_HOME` at build time and dlopens `libcuda` at run time — so the fleet's builder image needs nothing new for the host side.
+- What that buys: `risc0-groth16-cuda` (host side of s01/4) and the `cuda-oxide` backend are compiled in CI on `ubuntu-latest`; only the device module (`groth16_s01/cuda-kernels`, `cargo oxide`) and every launch remain for the CUDA host (E2).
+- What it does not settle: questions 4 and 5 of the verdict above (artifact shape on a real build; cudart/driver-API coexistence in one agent process) — unchanged, UNVERIFIED.
+

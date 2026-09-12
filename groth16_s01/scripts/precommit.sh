@@ -107,6 +107,7 @@ done
 crate_of() { case "$1" in
   risc0/groth16-core/*)  echo risc0-groth16-core ;;  risc0/groth16-oxide/*) echo risc0-groth16-oxide ;;
   risc0/groth16-metal/*) echo risc0-groth16-metal ;; risc0/groth16-sys/*)   echo risc0-groth16-sys ;;
+  risc0/groth16-cuda/*)  echo risc0-groth16-cuda ;;
   groth16_s01/harness/*) echo groth16-s01-harness ;; esac; }
 declare -A crates=(); rs=0
 for f in "${present[@]}"; do c=$(crate_of "$f"); [ -n "$c" ] && crates[$c]=1; [[ $f == *.rs ]] && rs=1; done
@@ -118,7 +119,12 @@ fi
 for f in "${present[@]}"; do [[ $f == *.rs || $f == *.h || $f == *.cpp ]] && { python3 license-check.py >/dev/null 2>&1 || bad "license headers: run 'python3 license-check.py' (and --fix for years)"; break; }; done
 if [ $rs = 1 ] && [ "${PRECOMMIT_NO_LINT:-0}" != 1 ]; then
   for c in "${!crates[@]}"; do
-    case $c in risc0-groth16-sys) feats=(--features reference,oxide-cpu) ;; *) feats=() ;; esac
+    # the CUDA arm's host crate builds cuda-bindings, which needs the CUDA headers (CUDA_HOME;
+    # groth16_s01/scripts/cuda-headers.sh fetches them rootless) — without them, say so and skip it
+    sysfeats=reference,oxide-cpu
+    if [ -n "${CUDA_HOME:-}" ]; then sysfeats=$sysfeats,cuda-oxide
+    elif [ "$c" = risc0-groth16-cuda ]; then say "note: CUDA_HOME unset — clippy on $c skipped (CI runs it)"; continue; fi
+    case $c in risc0-groth16-sys) feats=(--features "$sysfeats") ;; *) feats=() ;; esac
     if ! out=$(cargo clippy -p "$c" "${feats[@]}" --all-targets --locked -- -D warnings 2>&1); then
       bad "clippy ($c):"$'\n'"$(printf '%s\n' "$out" | grep -E '^(error|warning)' | head -5)"
     fi

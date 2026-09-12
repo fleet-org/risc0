@@ -261,14 +261,19 @@ pub fn compiled_in() -> Registry {
     let registry = registry.with(Box::new(reference::Reference));
     #[cfg(feature = "oxide-cpu")]
     let registry = registry.with(Box::new(oxide_cpu::OxideCpu));
+    #[cfg(feature = "cuda-oxide")]
+    let registry = registry.with(Box::new(cuda_oxide::CudaOxide));
     registry
 }
 
-#[cfg(any(feature = "reference", feature = "oxide-cpu"))]
+#[cfg(any(feature = "reference", feature = "oxide-cpu", feature = "cuda-oxide"))]
 pub mod reference;
 
 #[cfg(feature = "oxide-cpu")]
 pub mod oxide_cpu;
+
+#[cfg(feature = "cuda-oxide")]
+pub mod cuda_oxide;
 
 #[cfg(feature = "cuda")]
 mod canonical {

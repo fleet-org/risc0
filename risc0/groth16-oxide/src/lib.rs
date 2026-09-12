@@ -36,8 +36,10 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(missing_docs)]
 
+pub mod abi;
 pub mod kernels;
 #[cfg(feature = "std")]
 pub mod launch;
 #[cfg(feature = "std")]
 pub mod pipeline;
+pub mod schedule;

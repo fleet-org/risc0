@@ -12,6 +12,7 @@ on:
     branches: [integration/staging-platform]
     paths:
       - 'risc0/groth16-core/**'
+      - 'risc0/groth16-cuda/**'
       - 'risc0/groth16-metal/**'
       - 'risc0/groth16-oxide/**'
       - 'risc0/groth16-sys/**'
@@ -22,6 +23,7 @@ on:
     branches: [integration/staging-platform]
     paths:
       - 'risc0/groth16-core/**'
+      - 'risc0/groth16-cuda/**'
       - 'risc0/groth16-metal/**'
       - 'risc0/groth16-oxide/**'
       - 'risc0/groth16-sys/**'
@@ -61,6 +63,12 @@ jobs:
         run: |
           cargo test -p risc0-groth16-metal --locked
           cargo check -p risc0-groth16-metal --target aarch64-apple-darwin --locked
+      - name: CUDA 13 headers without a toolkit (rootless; what cuda-bindings needs to build)
+        run: groth16_s01/scripts/cuda-headers.sh "$RUNNER_TEMP/cuda" >> "$GITHUB_ENV"
+      - name: CUDA arm host side (risc0-groth16-cuda) and the cuda-oxide backend behind the boundary — type-check, no GPU
+        run: |
+          cargo check -p risc0-groth16-cuda --all-targets --locked
+          cargo check -p risc0-groth16-sys --features cuda-oxide --locked
       - name: Type-check the canonical CUDA path without nvcc
         env:
           RISC0_SKIP_BUILD_KERNELS: "1"
@@ -70,6 +78,9 @@ jobs:
 
   harness:
     name: s01/5 harness compiles (CPU prover + reference arm)
+    # Post-merge record only: a 30-minute compile that the owning session runs locally before every
+    # merge (DEF-G16-011). A PR is gated by the boundary job and the hygiene workflow.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:

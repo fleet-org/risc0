@@ -109,6 +109,8 @@ pub trait Groth16Backend {
 
 **Landed (C3, C4):** `risc0/groth16-sys/src/backend.rs` implements exactly this; `risc0/groth16-core` is the shared `no_std` crate (field · fp2 · ec · ntt · msm · zkey/wtns · prover) the arms build on, and `backend/reference.rs` runs its pipeline behind the boundary (DEF-G16-006). The reference is proven on the in-tree `multiplier2` fixture: its `proof.json` verifies under the unmodified `risc0-groth16` verifier, and an unsatisfied witness yields a proof that verifier rejects.
 
+**Landed (C8, host side of `cuda-oxide`):** `risc0/groth16-cuda` is the CUDA arm's host — it loads the cuda-oxide device module through `cuda-core` 0.3.1 (the driver-API runtime cuda-oxide itself uses; `RISC0_GROTH16_CUDA_MODULE` names a `.ptx`, a `.cubin`, or a `cargo oxide` build product) and runs the pipeline with device buffers; `backend/cuda_oxide.rs` registers it as `BackendKind::CudaOxide` under the `cuda-oxide` feature. The contract between the two halves is one shared module, `risc0_groth16_oxide::abi` (records = core's `#[repr(C)]` types with their sizes pinned by test; every slice a `(ptr, len)` pair; 256 threads per block; the kernel-name list the host resolves at start-up), and the coset transform's launch order is data, `risc0_groth16_oxide::schedule`, executed by the CPU pipeline, the Metal prover and the CUDA prover alike. The device half — `#[kernel]` wrappers around the oxide bodies — is a template in `groth16_s01/cuda-kernels` that only `cargo oxide` on a CUDA host can compile (E2); `groth16-cuda-kernel-check` is the first thing to run there. MEASURED without a GPU: the host crate and the backend type-check with the CUDA 13 headers alone (`groth16_s01/scripts/cuda-headers.sh`), in CI and in this session.
+
 Constraints this satisfies: the canonical path stays selectable on every build that has it (definition of done #2); selecting an unavailable backend is an error, never a silent fallback (three-state: *unavailable* ≠ *failed* ≠ *succeeded*); the harness (s01/5) runs canonical and rewrite on the same input in one process by flipping the selector.
 
 **Deltas above the boundary that the Metal arm needs** (CUDA arms need none): `risc0-groth16`'s [`prove/mod.rs`](https://github.com/fleet-org/risc0/blob/d7ee368e59ce6d9f94ecaeb6fc845e39ec5e9366/risc0/groth16/src/prove/mod.rs#L17) branches only on `cuda`; with `cuda` off it is Docker. A Metal build needs the `cuda.rs` code path (witness generation + `risc0_groth16_sys::prove`) available under a `metal` feature, minus the CUDA-only `risc0_zkp::hal::cuda::singleton().lock()`. The same two-line change applies to boundless's `blake3_groth16/src/prove.rs` for the blake3 circuit on macOS — a fleet/boundless-side integration item, noted here, not built here.
@@ -176,3 +178,28 @@ The launcher/implementation split maps onto cuda-oxide as: the kernel library cr
 ---
 
 **Bottom line.** The boundary is `risc0_groth16_sys::prove` in this fork; both circuits already cross it; the canonical CUDA implementation stays selectable behind a `Groth16Backend` trait with runtime selection; the data contract is fully specified above with one remaining mark (kernel wall-clock shares: UNVERIFIED until a CUDA host runs the corpus). Next: s01/3 captures the stage input/output forms of §4.3; s01/4 and s01/4b implement §3.1.
+
+## 7. Why `oxide-cpu` exists, and the devices the arms are for
+
+**`oxide-cpu` is not a CPU prover.** It is the CUDA arm's kernel code — the per-output-index bodies in `risc0-groth16-oxide::kernels`, the same functions the `#[kernel]` wrappers call on the device — run by the host launcher (`CpuLauncher`) through the same boundary. cuda-oxide compiles *Rust*, so the bodies can be compiled twice: by rustc for the host and by cuda-oxide for PTX. The host compilation is what lets the rewrite be proven against the canonical verifier on the production circuit before any GPU exists (C6: byte-identical proof to the reference on `stark_verify`) and keeps it proven on every PR afterwards, where CI has no GPU. It is registered as a **testing kind** (`BackendKind::OxideCpu`, DEF-G16-007), never the default and never a product path; the product arms are `cuda-oxide` and `metal`.
+
+**It does not relax the device constraints.** A body is one thread's work: no allocation, no data-dependent writes outside its own output slot, indices computed from the output index — the shape a GPU thread has. What the CPU launcher proves is therefore the code the device runs; the device-only parts are isolated where they can be checked on the device alone: the thread-index wrapper and `(ptr, len)` parameters (`groth16_s01/cuda-kernels`, the ABI), buffer transfer and launch (`risc0-groth16-cuda`), and the launch order (`risc0_groth16_oxide::schedule`, data shared by all three executors).
+
+**Devices, in order of the plan.** The baseline differential run (s01/5 with `--control canonical`) needs the canonical CUDA kernels next to the rewrite, i.e. a CUDA host: a rented instance of the class the fleet's prover nodes are (the builder image is CUDA 13.0.2; the publish labels name `sm_120`). The next version targets owned hardware:
+
+| device | arm | what matters | status |
+|---|---|---|---|
+| NVIDIA RTX 4090 (sm_89, 24 GB, R580+ driver for CUDA 13) | `cuda-oxide` | in cuda-oxide's `sm_80`–`sm_100a` range (pin §5); 24 GB is 6× the arm's peak working set below | INFERRED from the pin; unrun |
+| fleet prover nodes (`sm_120`) | `cuda-oxide` | **`sm_120` is not in the pin's target list**; `sm_100a` PTX is architecture-locked, so the module for these nodes must be built for a non-`a` target (`sm_100`, or `sm_89` and let the driver JIT) or cuda-oxide must gain `sm_120` — the first thing to settle on the CUDA host, before the baseline run | UNVERIFIED |
+| Apple M3 Max, 40-core GPU, Metal 3 / Apple9, 128 GB unified (spec captured 2026-09-12) | `metal` | no native INT64 ALU and multi-cycle `mulhi`: the MSL kernels use 32-bit-limb CIOS for that reason; 32 KB threadgroup memory is untouched (one thread per output, no tiling); `maxBufferLength` 72 GiB and unified memory make the whole zkey resident and zero-copy (`MTLStorageModeShared`) a later, cheap step | MEASURED spec; arm unrun |
+
+**Working-set budget per proof on the production circuit** (INFERRED from the MEASURED dimensions in §4: 5,635,930 variables, domain 2²³, 29,098,147 coefficients), for the CUDA host as written (polynomial buffers freed before the points go up):
+
+| phase | device bytes |
+|---|---|
+| scatter: coefficients (40 B) + witness + tables | ≈ 2.1 GB |
+| transform: 7 polynomials × 2²³ × 32 B + tables | ≈ 2.7 GB |
+| MSM: G1 a, b1, c, h (72 B) + G2 b2 (136 B) + scalars + digits/order | ≈ 3.0 GB |
+
+So the arm fits any 8 GB card, the M3 Max trivially, and keeping the zkey's points resident across calls (the canonical path re-uploads per call, §1) costs about 2.6 GB — the obvious first optimisation once correctness is measured. The MSM's bucket-sum launch has only 4095 threads per window (the M3 Max has 5,120 INT32 lanes; the RTX 4090 16,384): running all 22 windows in one launch is the second.
+
