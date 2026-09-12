@@ -11,6 +11,7 @@ Base branch `integration/staging-platform` = upstream tag `v3.0.4` (`d7ee368e`),
 | [`CORPUS.md`](./CORPUS.md) | s01/3 · #4 | capture recipe, coverage axes, manifest schema, freeze rules |
 
 | [`HARNESS.md`](./HARNESS.md) | s01/5 · #7 | the differential harness: oracle, assertions, mutation arms, measured results (`harness/`, `reports/`) |
+| [`../handoffs/cs-groth16-risc0-groth16-snark-m1.handback.md`](../handoffs/cs-groth16-risc0-groth16-snark-m1.handback.md) | handback | what landed where, what remains and who holds the key, what the artifacts do not show |
 
 Code map:
 

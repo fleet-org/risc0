@@ -1,0 +1,48 @@
+---
+kind: handback
+from: cs-groth16-risc0-groth16-snark-m1 (owner session, fleet-org/risc0 milestone 1)
+to: root-CP, and any successor session on GROTH16 s01 (arm sessions on a CUDA host or a Mac)
+refs:
+  - https://github.com/fleet-org/risc0/milestone/1
+  - https://github.com/fleet-org/risc0/issues/1 (entry; checkpoints C1–C6 as comments)
+  - https://github.com/fleet-org/risc0/pull/9 (docs) · /pull/10 (boundary) · /pull/11 (core + reference) · /pull/13 (harness + arms) · /pull/14 (rehearsal + kernel-check)
+---
+
+# GROTH16 s01 — handback after the first arc (2026-09-12)
+
+## What this session owned and what landed
+
+| checkpoint | what | where |
+|---|---|---|
+| C1 | goal opened; plan corrections reported; base branch cut at tag `v3.0.4` (DEF-G16-001) | comment on #1; `integration/staging-platform` |
+| C2 | s01/1 cuda-oxide pin, s01/2 boundary map, s01/3 corpus recipe | `groth16_s01/{CUDA_OXIDE_PIN,BOUNDARY,CORPUS}.md`; comments on #2, #3, #4 |
+| C3 | the boundary in code: `Groth16Backend`, `Registry`, `RISC0_GROTH16_BACKEND`, canonical backend under `cuda` | `risc0/groth16-sys/src/backend.rs`; CI job `groth16-s01` |
+| C4 | `risc0-groth16-core` (shared `no_std` arithmetic, NTT, MSM, zkey/wtns, prover) + `reference` backend | verified by arkworks and the in-tree fixture |
+| C5 | s01/5 harness, run on the real `stark_verify` circuit with the reference arm | `groth16_s01/harness`, `HARNESS.md`, `reports/` |
+| C6 | CUDA arm kernel bodies (`risc0-groth16-oxide`, proven on the CPU launcher on the real circuit as `oxide-cpu`), Metal arm (`risc0-groth16-metal`, darwin type-checked), production artifact readers | same PR; comments on #5, #6 |
+| C7 | harness rehearsal mode (assertions 2/3 exercised and shown to fail), Metal per-kernel check binary, the commit gate `groth16_s01/scripts/precommit.sh` | PR #14, this PR |
+
+Every claim in those documents is marked MEASURED / INFERRED / UNVERIFIED; every source link is a full-SHA permalink.
+
+## What remains, and who holds the key
+
+| item | blocked on | what unblocks it |
+|---|---|---|
+| s01/3 corpus (assertions 2 and 3 on production data) | production access (E1) | run `CORPUS.md` §2 where the agent's `DATABASE_URL`/`S3_*` are set; freeze as a GitHub Release on this fork |
+| s01/4 device launcher for the CUDA arm | a CUDA 13 host with the nightly + `cargo oxide` (E2) | prove the two-phase artifact shape and cudart/driver-API coexistence first (`CUDA_OXIDE_PIN.md` verdict); then `#[cuda_module]` wrappers over `risc0-groth16-oxide::kernels`; then `harness run … cuda-oxide --control canonical` |
+| s01/4b Metal execution | a macOS 13+ Apple Silicon host (E3) | `cargo run -p risc0-groth16-metal --bin groth16-metal-kernel-check`, then `harness run … metal --control reference` |
+| s01/6 on-chain e2e + timing | the deployment (and fleet-org/fleet#1950 or production authorization) | out of any CRCS's reach; needs root-CP |
+
+## What the artifacts do not show (learned the hard way)
+
+- **The fork's `main` is not the target.** bento pins `risc0-groth16 3.0.3` from crates.io; the editable surface is `risc0-groth16-sys` at tag `v3.0.4`, reached from bento by `[patch.crates-io]`. Anyone working from `main` (5.0.0, no `bento/`) is on a different product.
+- **Both circuits share the boundary.** `Groth16` and `Blake3Groth16` differ only in the artifact directory handed to `risc0_groth16_sys::prove`; production uses the blake3 variant (INFERRED from the fleet's template env). The blake3 artifacts (2.4 GB) were not exercised here.
+- **Encodings:** zkey points Montgomery LE; coefficient values `v·R²`; witness canonical. A port that gets any of the three wrong produces a proof that fails to verify with no other symptom.
+- **CRCS toolchain:** no C compiler, no `protoc`, no libclang, no xz in the container; the relocations that worked are recorded in the catalog draft `groth16-s01-fork-baseline` (I-ASM-006..008); the session's `buildenv.sh` in its home directory is the sourced form. The memory guard counts page cache: keep `evict-cache.py` running beside big reads or builds.
+- **Every commit passes `groth16_s01/scripts/precommit.sh`** (privacy, links, format, license, clippy, message shape); install it once with `--install`. CI runs the same script on the PR range.
+- **A claim does not encode work**: two runs of the same guest with the same journal are the same statement; the cross-claim arm needs a different image id or journal, or its labeled derived-claim fallback.
+- **The `canonical answers` arm needs a control that differs from the rewrite and is compiled in**; on a CUDA host use `--control canonical`, elsewhere `--control reference`.
+
+## How to resume
+
+The session container's ledger holds `next_action_on_resume`; this file and the milestone comments hold everything a successor needs without it. Start from `groth16_s01/README.md` (code map), then `BOUNDARY.md` §3.1, then run `cargo test -p risc0-groth16-core -p risc0-groth16-oxide -p risc0-groth16-sys --features risc0-groth16-sys/reference,risc0-groth16-sys/oxide-cpu` to confirm the contract before touching an arm.

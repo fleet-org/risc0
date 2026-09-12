@@ -1,0 +1,59 @@
+# GROTH16 s01 — the commit gate, run on the PR range: privacy, links, whitespace, rustfmt,
+# license headers, clippy on the crates touched, commit-message shape. Mirrors
+# groth16_s01/scripts/precommit.sh exactly (that script IS the check), so local and CI agree.
+name: groth16-s01-hygiene
+
+on:
+  pull_request:
+    branches: [integration/staging-platform]
+    paths:
+      - 'risc0/groth16-core/**'
+      - 'risc0/groth16-metal/**'
+      - 'risc0/groth16-oxide/**'
+      - 'risc0/groth16-sys/**'
+      - 'groth16_s01/**'
+      - 'handoffs/**'
+      - 'license-check.py'
+      - '.github/workflows/groth16-s01*.yml'
+  push:
+    branches: [integration/staging-platform]
+    paths:
+      - 'risc0/groth16-core/**'
+      - 'risc0/groth16-metal/**'
+      - 'risc0/groth16-oxide/**'
+      - 'risc0/groth16-sys/**'
+      - 'groth16_s01/**'
+      - 'handoffs/**'
+      - 'license-check.py'
+      - '.github/workflows/groth16-s01*.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    name: commit gate on the PR range
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the range and license-check.py need history
+      - name: Toolchain (pinned by rust-toolchain.toml) with rustfmt and clippy
+        run: |
+          rustup show active-toolchain
+          rustup component add rustfmt clippy
+      - name: cargo-sort
+        run: cargo install cargo-sort --version '^1.0' --locked
+      - name: precommit.sh on the range
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          else
+            range="${{ github.event.before }}..${{ github.sha }}"
+          fi
+          echo "range: $range"
+          groth16_s01/scripts/precommit.sh --range "$range"
