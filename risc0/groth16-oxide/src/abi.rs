@@ -62,8 +62,14 @@ pub const NTT_STAGE: &str = "ntt_stage";
 /// `out[i] = digit(scalars[i], window, w)`. Params: `out, n, scalars,
 /// scalars_len, window: u32, w: u32`; `scalars` are canonical `[u64; 4]`.
 pub const DIGITS: &str = "digits";
+/// `out[i] = digit(scalars[i % n], i / n, w)` for `i < windows · n` — every
+/// window in one launch. Params: `out, n_total, scalars, scalars_len, w: u32`.
+pub const DIGITS_ALL: &str = "digits_all";
 /// `out[b] = Σ points[order[j]]` for `j` in `starts[b]..starts[b+1]`, G1.
 /// Params: `out, n, points, points_len, order, order_len, starts, starts_len`.
+/// With `order` the concatenation of every window's sorted indices and
+/// `starts` flat over `(window, bucket)` (see `pipeline::sort_all_windows`),
+/// one launch of `windows · buckets` outputs sums every window.
 pub const BUCKET_SUM_G1: &str = "bucket_sum_g1";
 /// The same over G2 (`Affine<Fp2>` in, `Jacobian<Fp2>` out).
 pub const BUCKET_SUM_G2: &str = "bucket_sum_g2";
@@ -77,6 +83,7 @@ pub const KERNELS: &[&str] = &[
     BIT_REVERSE,
     NTT_STAGE,
     DIGITS,
+    DIGITS_ALL,
     BUCKET_SUM_G1,
     BUCKET_SUM_G2,
 ];
@@ -115,6 +122,6 @@ mod tests {
         assert_eq!(blocks(1), 1);
         assert_eq!(blocks(BLOCK), 1);
         assert_eq!(blocks(BLOCK + 1), 2);
-        assert_eq!(KERNELS.len(), 9);
+        assert_eq!(KERNELS.len(), 10);
     }
 }

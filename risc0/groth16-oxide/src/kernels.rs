@@ -96,6 +96,15 @@ pub fn digit(i: usize, scalars: &[[u64; 4]], window: u32, w: u32) -> u32 {
     risc0_groth16_core::scalar::digit(&scalars[i], window, w) as u32
 }
 
+/// Every window's digits in one launch: output `i` is scalar `i % n`'s
+/// digit for window `i / n` (`n = scalars.len()`), so the host reads one
+/// buffer of `windows · n` digits instead of one per window.
+#[inline]
+pub fn digit_all(i: usize, scalars: &[[u64; 4]], w: u32) -> u32 {
+    let n = scalars.len();
+    digit(i % n, scalars, (i / n) as u32, w)
+}
+
 /// Bucket sum for bucket `b` (digit `b + 1`): the points whose digit is
 /// `b + 1` occupy `order[starts[b]..starts[b + 1]]` after the host's
 /// counting sort; add them into one Jacobian accumulator.

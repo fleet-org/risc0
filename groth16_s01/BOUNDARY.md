@@ -363,6 +363,9 @@ the canonical path re-maps and re-uploads the 3.45 GiB file on every call. The r
 five point sets (≈ 2.6 GB), the grouped coefficients and starts (≈ 1.2 GB) and the NTT tables (≈ 0.8
 GB): ≈ 4.6 GB on the production circuit (INFERRED from the measured dimensions), plus ≈ 3 GB of
 per-proof scratch at peak. `RISC0_GROTH16_RESIDENT=0` restores per-call uploads for a device that
-cannot hold it. The MSM's bucket-sum launch still has only 4095 threads per window (the M3 Max has
-5,120 INT32 lanes; the RTX 4090 16,384): running all 22 windows in one launch is the next
-optimisation, after correctness is measured.
+cannot hold it. Since C12 each MSM is two launches: `digits_all` over every window at once, then one
+`bucket_sum` over `windows · buckets` outputs with the host's per-window counting sorts laid out
+flat (`pipeline::sort_all_windows`) — 22 round trips per MSM become 2, and the bucket-sum launch has
+22 × 4,095 threads instead of 4,095 (the M3 Max has 5,120 INT32 lanes; the RTX 4090 16,384). The CPU
+launcher runs the same orchestration under the byte-identical-proof test, so the structure is
+verified before either device runs it; a device-side sort is the next step after that.

@@ -179,6 +179,23 @@ pub mod groth16 {
         }
     }
 
+    /// `abi::DIGITS_ALL`: every window in one launch (`n` here is the total
+    /// `windows · scalars` output count; the body derives the window).
+    #[kernel]
+    pub unsafe fn digits_all(
+        out: *mut u32,
+        n: u32,
+        scalars: *const [u64; 4],
+        scalars_len: u32,
+        w: u32,
+    ) {
+        let i = thread::index_1d().get();
+        if i < n as usize {
+            // SAFETY: as above.
+            unsafe { *out.add(i) = kernels::digit_all(i, sl(scalars, scalars_len), w) };
+        }
+    }
+
     /// `abi::BUCKET_SUM_G1`
     #[kernel]
     pub unsafe fn bucket_sum_g1(
