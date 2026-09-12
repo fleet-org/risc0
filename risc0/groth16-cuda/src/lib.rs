@@ -43,7 +43,6 @@
 #![deny(missing_docs)]
 
 pub mod device;
-pub mod g2_generator;
 pub mod module;
 
 pub use device::{CudaProver, KernelCheck};

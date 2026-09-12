@@ -31,3 +31,7 @@ tempfile = "3"
 default = []
 # Make the canonical CUDA backend available to the harness (needs nvcc + a CUDA host).
 cuda = ["risc0-groth16-sys/cuda", "risc0-zkvm/cuda"]
+# The CUDA arm (needs the CUDA 13 headers to build, a driver + the device module to run).
+cuda-oxide = ["risc0-groth16-sys/cuda-oxide"]
+# The Metal arm (macOS on Apple Silicon only; elsewhere the kind is unavailable).
+metal = ["risc0-groth16-sys/metal"]

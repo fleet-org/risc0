@@ -32,7 +32,9 @@ tracing = "0.1.41"
 [features]
 default = []
 cuda = ["dep:blst", "dep:sppark"]
-metal = []
+# The Metal arm (s01/4b): available only on macOS/aarch64 builds; the feature exists everywhere so a
+# selection of `metal` elsewhere is an explicit "unavailable", never a silent fallback.
+metal = ["dep:risc0-groth16-core", "dep:getrandom", "dep:risc0-groth16-metal"]
 # CPU reference prover behind the same boundary: for tests and the differential harness,
 # never the default, not a production path (GROTH16 s01, DEF-G16-006).
 reference = ["dep:risc0-groth16-core", "dep:getrandom"]
@@ -43,3 +45,6 @@ oxide-cpu = ["dep:risc0-groth16-oxide", "dep:risc0-groth16-core", "dep:getrandom
 # GPU (CUDA headers only); runs only where a CUDA 13 driver and the device module exist.
 cuda-oxide = ["dep:risc0-groth16-cuda", "dep:risc0-groth16-core", "dep:getrandom"]
 setup = []
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+risc0-groth16-metal = { path = "../groth16-metal", optional = true }

@@ -104,6 +104,8 @@ def main():
     root = repo_root()
     ret = 0
     for path in tracked_files():
+        if not path.exists():
+            continue  # deleted in the working tree (staged or not): nothing to check
         if path.suffix in EXTENSIONS and ".inc" not in path.suffixes:
             skip = False
             for path_start in SKIP_DIRS:
