@@ -135,3 +135,36 @@ _pending — needs the corpus (E1 on #1)._
 Seal encoding for the chain, selector routing through the verifier router, and SetVerifier Merkle
 inclusion — those are s01/6's on-chain oracle. Timing here is the harness host's wall-clock,
 reported for information, not as a performance claim.
+
+### The production circuit through the CUDA arm on hardware (`cuda-oxide`, RTX 5080), control = `reference` — MEASURED 2026-09-12
+
+The session container was recycled onto a box with an NVIDIA GeForce RTX 5080 (`sm_120`, driver
+580.95.05). The arm ran from the `ptx-c13` release's PTX, unchanged since it was built and validated
+without a GPU (C13); the driver's user-space library was fetched rootless at the module's version.
+
+| case                | rewrite    | rewrite verifies (1)                                                     | bit-flip | cross-claim | canonical answers | malformed input | derive s | prove s |
+| ------------------- | ---------- | ------------------------------------------------------------------------ | -------- | ----------- | ----------------- | --------------- | -------: | ------: |
+| synthetic-loop-100k | cuda-oxide | **yes**                                                                  | killed   | killed      | killed            | killed          |     26.1 |   125.7 |
+| synthetic-loop-0    | cuda-oxide | not run: `DriverError(2, "out of memory")` uploading a 256 MB polynomial |          |             |                   |                 |     25.7 |       — |
+
+Assertions 2 and 3 remain _not run_ (no canonical output: E1). Full rows in
+[`reports/synthetic-loop-100k.cuda-oxide.md`](./reports/synthetic-loop-100k.cuda-oxide.md).
+
+**What the numbers mean.** The arm's first production-scale proof on a device verifies under the
+upstream verifier with every mutation arm killed. 125.7 s is an unoptimised arm — serial bucket
+loops per thread, the host's counting sort of 22 × 5.6M digits per MSM, 493 MB read back per MSM —
+against 113 s for the reference on the CPU (C5) and 29.5 s for the CPU launcher (C6); correctness
+came first, and the profile of where the time goes is the next hardware question.
+
+**The out-of-memory is the environment's, not the arm's.** The device is shared: three
+`cuMemGetInfo` samples two seconds apart read 11.4, 3.2 and 11.4 GiB free of 15.5, so another tenant
+peaks at ≈ 12 GiB. The arm's working set (≈ 4.7 GB resident, ≈ 3 GB per-proof scratch) plus that
+peak exceeds the card; the first run met the peak, the second did not. GPU runs from this session
+stopped there, pending a quiet window or a dedicated device (asked of root-CP), because on the
+tenant's peak either side fails — and the tenant may be production.
+
+**Also through the boundary, on the fixture:**
+`cargo test -p risc0-groth16-sys --features cuda-oxide` runs the reference backend's three
+properties for `cuda-oxide` on the device (verifies; an unsatisfied witness is rejected by the
+verifier; a non-field witness value is rejected before proving), and `--features metal-cpu` the same
+for the Metal shaders on the CPU — one shared fixture helper, every kind.

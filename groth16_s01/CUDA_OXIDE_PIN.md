@@ -216,3 +216,17 @@ the template's two UNVERIFIED points and corrected one statement above:
   `Affine`, the generic `bucket_sum<F>`, cross-crate bodies — lowered without change.
 - **Still UNVERIFIED:** the launches (driver load, per-kernel agreement, coexistence, timing) — the
   CUDA host's first hour, from the `ptx-c13` release's PTX.
+
+## Addendum (C15) — the first hardware run, MEASURED 2026-09-12
+
+- **Device:** NVIDIA GeForce RTX 5080 (`sm_120`, the class of the fleet's prover nodes), driver
+  580.95.05 (open kernel module), device nodes world-readable in the session container; no driver
+  user-space library in the container — `libnvidia-compute-580` at the module's exact version from
+  NVIDIA's CUDA repository, extracted rootless, put on `LD_LIBRARY_PATH`; `cuInit` 0, driver
+  API 13000.
+- **Result:** `groth16-cuda-kernel-check` against the `ptx-c13` release — every kernel, both MSMs
+  and the fixture proof (byte-identical to the core prover) agree, for the `sm_120` module and for
+  the `sm_89` module through the driver's JIT. Nothing changed between the GPU-less build (C13) and
+  the launch: verdict items 4 (artifact shape) and the template review's open points are settled by
+  hardware; item 5 (coexistence with the cudart HAL in one process) remains for the
+  canonical-beside- the-arm build.

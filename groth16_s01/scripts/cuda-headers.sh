@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# CUDA 13 headers and the PTX assembler without a toolkit or root: the driver-API, runtime, CRT, CCCL,
-# cuRAND dev and nvcc
+# A CUDA 13 compiler and headers without a toolkit or root: the driver-API, runtime, CRT, CCCL,
+# cuRAND dev, nvcc, NVVM and the PTX compiler library
 # packages from NVIDIA's Ubuntu 24.04 repository, extracted with dpkg-deb into <dest>. Enough for
 # `cuda-bindings` (bindgen over cuda.h + curand.h), hence for type-checking risc0-groth16-cuda
 # on a machine with no GPU — CI and the CRCS both use it. Prints the two variables to export.
@@ -23,7 +23,9 @@ pick() { # newest Filename of a package
     f && /^$/         { print v, fn; f = 0 }' | sort -V | tail -1 | cut -d' ' -f2
 }
 # cuda-nvcc carries ptxas (and nvcc), which cargo-oxide's doctor and ptx-check.sh use; ≈ 30 MB more
-pkgs=(cuda-driver-dev cuda-cudart-dev cuda-crt cuda-cccl libcurand-dev cuda-nvcc)
+# cuda-nvcc needs libnvvm (cicc, libdevice) and libnvptxcompiler to COMPILE, not only to assemble;
+# with them this is a working nvcc: the canonical CUDA path (sppark + risc0 kernels) builds from it
+pkgs=(cuda-driver-dev cuda-cudart-dev cuda-crt cuda-cccl libcurand-dev cuda-nvcc libnvvm libnvptxcompiler)
 for name in "${pkgs[@]}"; do
   p=$name-$series
   f=$(pick "$p")

@@ -228,7 +228,7 @@ if [ $rs = 1 ] && [ "${PRECOMMIT_NO_LINT:-0}" != 1 ]; then
   for c in "${!crates[@]}"; do
     # the CUDA arm's host crate builds cuda-bindings, which needs the CUDA headers (CUDA_HOME;
     # groth16_s01/scripts/cuda-headers.sh fetches them rootless) — without them, say so and skip
-    sysfeats=reference,oxide-cpu
+    sysfeats=reference,oxide-cpu,metal-cpu
     if [ -n "${CUDA_HOME:-}" ]; then
       sysfeats=$sysfeats,cuda-oxide
     elif [ "$c" = risc0-groth16-cuda ]; then

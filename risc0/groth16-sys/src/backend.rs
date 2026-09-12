@@ -74,16 +74,20 @@ pub enum BackendKind {
     /// host launcher: the exact kernel code, without a GPU. A testing kind
     /// like `reference` — never the default, not a production path.
     OxideCpu,
+    /// The Metal arm's shaders compiled as C++ and run on the CPU (every target
+    /// but macOS): the Metal counterpart of `OxideCpu`, a testing kind.
+    MetalCpu,
 }
 
 impl BackendKind {
     /// Every kind, in a stable order.
-    pub const ALL: [BackendKind; 5] = [
+    pub const ALL: [BackendKind; 6] = [
         BackendKind::Canonical,
         BackendKind::CudaOxide,
         BackendKind::Metal,
         BackendKind::Reference,
         BackendKind::OxideCpu,
+        BackendKind::MetalCpu,
     ];
 
     /// The kind used when [`BACKEND_ENV`] is absent.
@@ -97,6 +101,7 @@ impl BackendKind {
             BackendKind::Metal => "metal",
             BackendKind::Reference => "reference",
             BackendKind::OxideCpu => "oxide-cpu",
+            BackendKind::MetalCpu => "metal-cpu",
         }
     }
 
@@ -263,6 +268,11 @@ pub fn compiled_in() -> Registry {
     let registry = registry.with(Box::new(oxide_cpu::OxideCpu));
     #[cfg(feature = "cuda-oxide")]
     let registry = registry.with(Box::new(cuda_oxide::CudaOxide));
+    #[cfg(all(
+        feature = "metal-cpu",
+        not(all(target_os = "macos", target_arch = "aarch64"))
+    ))]
+    let registry = registry.with(Box::new(metal_cpu::MetalCpu));
     #[cfg(all(feature = "metal", target_os = "macos", target_arch = "aarch64"))]
     let registry = registry.with(Box::new(metal::Metal));
     registry
@@ -272,14 +282,15 @@ pub fn compiled_in() -> Registry {
     feature = "reference",
     feature = "oxide-cpu",
     feature = "cuda-oxide",
-    feature = "metal"
+    feature = "metal",
+    feature = "metal-cpu"
 ))]
 pub mod reference;
 
 #[cfg(feature = "oxide-cpu")]
 pub mod oxide_cpu;
 
-#[cfg(any(feature = "cuda-oxide", feature = "metal"))]
+#[cfg(any(feature = "cuda-oxide", feature = "metal", feature = "metal-cpu"))]
 pub mod resident;
 
 #[cfg(feature = "cuda-oxide")]
@@ -287,6 +298,15 @@ pub mod cuda_oxide;
 
 #[cfg(all(feature = "metal", target_os = "macos", target_arch = "aarch64"))]
 pub mod metal;
+
+#[cfg(all(
+    feature = "metal-cpu",
+    not(all(target_os = "macos", target_arch = "aarch64"))
+))]
+pub mod metal_cpu;
+
+#[cfg(test)]
+pub(crate) mod fixture;
 
 #[cfg(feature = "cuda")]
 mod canonical {
@@ -478,6 +498,15 @@ mod tests {
         }
         if cfg!(feature = "oxide-cpu") {
             expected.push(BackendKind::OxideCpu);
+        }
+        if cfg!(feature = "cuda-oxide") {
+            expected.push(BackendKind::CudaOxide);
+        }
+        if cfg!(all(
+            feature = "metal-cpu",
+            not(all(target_os = "macos", target_arch = "aarch64"))
+        )) {
+            expected.push(BackendKind::MetalCpu);
         }
         assert_eq!(compiled_in().available(), expected);
     }

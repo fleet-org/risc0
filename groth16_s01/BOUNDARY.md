@@ -164,6 +164,7 @@ pub trait Groth16Backend {
 //   metal       #[cfg(all(feature = "metal", target_os = "macos", target_arch = "aarch64"))] → MSL kernels (s01/4b)
 //   reference   #[cfg(feature = "reference")]                                  → risc0-groth16-core on the CPU (tests + harness control arm; never the default)
 //   oxide-cpu   #[cfg(feature = "oxide-cpu")]                                  → the CUDA arm's kernel bodies on the host launcher (tests; never the default)
+//   metal-cpu   #[cfg(all(feature = "metal-cpu", not(macos)))]                 → the Metal shaders compiled as C++ on the CPU (tests + harness; never the default)
 ```
 
 **Landed (C3, C4):** `risc0/groth16-sys/src/backend.rs` implements exactly this;
@@ -209,6 +210,15 @@ target: the SAME shader source compiled as C++ by the crate's build script again
 through the shaders and compares with the Rust bodies and the core prover — MEASURED green. What the
 Mac still has to show is the Metal compiler and the device themselves; the shaders' arithmetic,
 layouts and orchestration are verified here.
+
+**Landed (C15, the CUDA arm on hardware):** on an RTX 5080 (`sm_120`, driver 580.95.05),
+`groth16-cuda-kernel-check` against the `ptx-c13` release passed every kernel, both MSMs and the
+fixture proof for the `sm_120` module and for the `sm_89` module through the driver's JIT —
+MEASURED, first launch, no change since the GPU-less build. The production-circuit harness run
+through the GPU is reported in HARNESS.md. `metal-cpu` (the Metal shaders on the CPU) is the sixth
+kind, a testing kind on every target but macOS; the boundary crate's tests run the reference
+backend's three fixture properties for every compiled-in kind through one helper, including
+`cuda-oxide` on the device.
 
 Constraints this satisfies: the canonical path stays selectable on every build that has it
 (definition of done #2); selecting an unavailable backend is an error, never a silent fallback

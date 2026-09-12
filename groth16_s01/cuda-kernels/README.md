@@ -47,11 +47,12 @@ composite step (`msm (g1)`, `msm (g2)`, `proof (fixture)`) whose output differs 
 `risc0_groth16_oxide::kernels`, on the shared cases of `risc0_groth16_oxide::check` — the same cases
 the Metal arm's check runs.
 
-Still UNVERIFIED until a CUDA host runs it — the launches themselves:
+First hardware run (MEASURED, C15, on an RTX 5080 with the 580.95.05 driver — the fleet's `sm_120`
+class): `groth16-cuda-kernel-check` against the `ptx-c13` release passed 13/13 for the `sm_120`
+module and for the `sm_89` module through the driver's JIT, unchanged from what was built without a
+GPU. The container had only the device nodes; `libnvidia-compute-580` at the module's exact version,
+fetched rootless from NVIDIA's repository onto `LD_LIBRARY_PATH`, was all `cuda-core` needed.
 
-1. that the driver (R580+) loads this `.version 7.8` PTX and `cuLaunchKernel` accepts each entry's
-   parameters as staged (the layouts match by inspection; the launch is the test);
-2. that every kernel agrees with the Rust bodies on the shared cases (`groth16-cuda-kernel-check`)
-   and the fixture proof matches the core prover — the arithmetic lowered by an alpha backend;
-3. from the pin document, unchanged: cudart/driver-API context coexistence in one agent process;
-4. wall-clock against the canonical kernels (s01/5 with `--control canonical`).
+Still UNVERIFIED after that: cudart/driver-API context coexistence in one bento process (needs the
+canonical path built with nvcc beside the arm) and timing against the canonical kernels (the same
+build); both are the next hardware step.

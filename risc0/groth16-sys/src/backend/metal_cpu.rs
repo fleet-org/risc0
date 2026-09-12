@@ -12,31 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `BackendKind::CudaOxide`: the CUDA arm (GROTH16 s01/4) behind the
-//! boundary — the zkey is parsed and uploaded ONCE per process and kept on
-//! device 0 (`resident`; `RISC0_GROTH16_RESIDENT=0` for per-call uploads),
-//! the witness is read exactly as the reference reads it, the proof is
-//! produced by `risc0-groth16-cuda` from the module named by
-//! `RISC0_GROTH16_CUDA_MODULE`, and the JSON files are written where the
-//! canonical path writes them.
+//! `BackendKind::MetalCpu`: the Metal arm's shaders compiled as C++ and run
+//! on the CPU (`risc0_groth16_metal::device::HostMslProver`), behind the same
+//! boundary — the Metal counterpart of `oxide-cpu`: it proves the exact
+//! shader source on a machine without a Metal device, through the harness
+//! and the upstream verifier. A testing kind, never the default, not a
+//! production path. Available on every target but macOS (there the real
+//! `metal` kind runs the same pipeline on the device).
 
 use anyhow::{anyhow, Context as _};
 use risc0_groth16_core::{
     prover::{proof_json, public_json, CoefficientGroups},
     zkey::{parse_witness_values, Zkey},
 };
-
-use risc0_groth16_cuda::{CudaProver, ModuleSource, ResidentZkey};
+use risc0_groth16_metal::device::{HostBackend, HostMslProver, ResidentZkey};
 
 use super::{reference::random_scalar, resident, BackendKind, Groth16Backend};
 use crate::{ProverParams, SetupParams};
 
-/// The CUDA arm.
-pub struct CudaOxide;
+/// The Metal shaders on the CPU.
+pub struct MetalCpu;
 
-impl Groth16Backend for CudaOxide {
+impl Groth16Backend for MetalCpu {
     fn kind(&self) -> BackendKind {
-        BackendKind::CudaOxide
+        BackendKind::MetalCpu
     }
 
     fn prove(&self, prover: &ProverParams, setup: &SetupParams) -> anyhow::Result<()> {
@@ -49,8 +48,8 @@ impl Groth16Backend for CudaOxide {
             };
             let groups = CoefficientGroups::from_zkey(&zkey);
             zkey.coefficients = Vec::new();
-            let device = CudaProver::new(ModuleSource::from_env()?)?;
-            let resident = device.prepare(&zkey, &groups)?;
+            let device = HostMslProver::new()?;
+            let resident = device.prepare(&zkey, &groups);
             Ok(Prepared { device, resident })
         };
         let p = if resident::enabled() {
@@ -66,7 +65,7 @@ impl Groth16Backend for CudaOxide {
         let proof = p
             .device
             .prove_resident(&p.resident, &witness, &r, &s)
-            .context("cuda-oxide prover")?;
+            .context("metal shaders on the CPU")?;
         std::fs::write(
             prover.public_path.as_path(),
             public_json(&witness, num_public),
@@ -78,11 +77,17 @@ impl Groth16Backend for CudaOxide {
     }
 }
 
-/// The device, its module, and the zkey resident on it.
+/// The CPU executor and the zkey resident in its buffers.
 struct Prepared {
-    device: CudaProver,
-    resident: ResidentZkey,
+    device: HostMslProver,
+    resident: ResidentZkey<HostBackend>,
 }
+
+// SAFETY: the host buffers are plain `Vec<u8>`s behind `UnsafeCell`; the cache hands out an
+// `Arc` and the prover runs sequentially per call, never sharing a buffer across threads
+// mid-run (the same invariant the Metal device backend relies on).
+unsafe impl Send for Prepared {}
+unsafe impl Sync for Prepared {}
 
 static CACHE: resident::Cache<Prepared> = resident::Cache::new();
 
@@ -90,28 +95,10 @@ static CACHE: resident::Cache<Prepared> = resident::Cache::new();
 mod tests {
     use crate::backend::fixture;
 
-    /// Why the device test cannot run here, or `None` when it can.
-    fn not_here() -> Option<String> {
-        let env = risc0_groth16_cuda::ModuleSource::ENV;
-        if std::env::var_os(env).is_none() {
-            return Some(format!("{env} unset: no device module to load"));
-        }
-        if !std::path::Path::new("/dev/nvidiactl").exists() {
-            return Some("no /dev/nvidiactl: no CUDA device in this environment".into());
-        }
-        None
-    }
-
-    /// The same three properties as the reference backend's, through the
-    /// boundary on the GPU — runnable only where a device and the module
-    /// exist (no CI runner has one); elsewhere it says why it did not run
-    /// rather than pass vacuously.
+    /// The Metal shaders on the CPU through the boundary: the same three
+    /// properties as the reference backend's, on any Linux box.
     #[test]
-    fn cuda_oxide_through_the_boundary_on_the_device() {
-        if let Some(why) = not_here() {
-            eprintln!("cuda-oxide device test NOT RUN: {why}");
-            return;
-        }
-        fixture::three_properties("cuda-oxide");
+    fn metal_cpu_through_the_boundary() {
+        fixture::three_properties("metal-cpu");
     }
 }
