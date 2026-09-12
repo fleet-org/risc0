@@ -103,7 +103,10 @@ pub trait Groth16Backend {
 //   canonical   #[cfg(feature = "cuda")]                                       → extern "C" risc0_groth16_cuda_prove (unchanged)
 //   cuda-oxide  #[cfg(feature = "cuda-oxide")]                                 → Rust kernels (s01/4)
 //   metal       #[cfg(all(feature = "metal", target_os = "macos", target_arch = "aarch64"))] → MSL kernels (s01/4b)
+//   reference   #[cfg(feature = "reference")]                                  → risc0-groth16-core on the CPU (tests + harness control arm; never the default)
 ```
+
+**Landed (C3, C4):** `risc0/groth16-sys/src/backend.rs` implements exactly this; `risc0/groth16-core` is the shared `no_std` crate (field · fp2 · ec · ntt · msm · zkey/wtns · prover) the arms build on, and `backend/reference.rs` runs its pipeline behind the boundary (DEF-G16-006). The reference is proven on the in-tree `multiplier2` fixture: its `proof.json` verifies under the unmodified `risc0-groth16` verifier, and an unsatisfied witness yields a proof that verifier rejects.
 
 Constraints this satisfies: the canonical path stays selectable on every build that has it (definition of done #2); selecting an unavailable backend is an error, never a silent fallback (three-state: *unavailable* ≠ *failed* ≠ *succeeded*); the harness (s01/5) runs canonical and rewrite on the same input in one process by flipping the selector.
 
@@ -117,7 +120,7 @@ Constraints this satisfies: the canonical path stays selectable on every build t
 
 | field | file | format (MEASURED from `groth16_srs.cuh` / `groth16_coeffs.cuh` / `groth16_prover.cuh`) |
 |---|---|---|
-| `srs_path` | `stark_verify_final.zkey` (risc0) / `verify_for_guest_final.zkey` (blake3) | snarkjs **zkey**: magic `"zkey"`, u32 version, u32 `num_sections` (must be 10); each section = u32 id + u64 size. §1 header: u32 protocol (must be 1 = Groth16). §2 Groth16 header: `q` (u32 len + bytes), `r` (u32 len + bytes), u32 `num_vars`, u32 `num_public`, u32 `domain_size`, then vk α<sub>1</sub> (64 B), β<sub>1</sub> (64), β<sub>2</sub> (128), γ<sub>2</sub> (128), δ<sub>1</sub> (64), δ<sub>2</sub> (128). §3 IC (skipped). §4 coefficients: `{u32 m, u32 c, u32 s, 32-byte value}` packed, 4-byte pad before the array. §5 A, §6 B1, §8 C, §9 H: G1 affine, 64 B each; §7 B2: G2 affine, 128 B each. Points are copied to the device **raw** (`HtoD` of the byte range, no conversion) — INFERRED from snarkjs's writer: little-endian limbs in Montgomery form. |
+| `srs_path` | `stark_verify_final.zkey` (risc0) / `verify_for_guest_final.zkey` (blake3) | snarkjs **zkey**: magic `"zkey"`, u32 version, u32 `num_sections` (must be 10); each section = u32 id + u64 size. §1 header: u32 protocol (must be 1 = Groth16). §2 Groth16 header: `q` (u32 len + bytes), `r` (u32 len + bytes), u32 `num_vars`, u32 `num_public`, u32 `domain_size`, then vk α<sub>1</sub> (64 B), β<sub>1</sub> (64), β<sub>2</sub> (128), γ<sub>2</sub> (128), δ<sub>1</sub> (64), δ<sub>2</sub> (128). §3 IC (skipped). §4 coefficients: `{u32 m, u32 c, u32 s, 32-byte value}` packed, 4-byte pad before the array. §5 A, §6 B1, §8 C, §9 H: G1 affine, 64 B each; §7 B2: G2 affine, 128 B each. Points are copied to the device **raw** (`HtoD` of the byte range, no conversion). **MEASURED** on the in-tree `groth16_proof/circom-compat/test/data/multiplier2_final.zkey`: coordinates are little-endian limbs in **Montgomery form** (raw α₁ is off-curve, ×R⁻¹ is on-curve); §4 coefficient `value`s are stored as **v·R² mod r** (the constant 1 reads back as R², −1 as −R²), so `witness_into_poly`'s Montgomery multiply `w · vR² · R⁻¹` yields `(w·v)·R` — the pipeline is in Montgomery form from the scatter onward, which is why the h-MSM takes `mont = true` and the witness MSMs `mont = false`. |
 | `pcoeffs_path` | `preprocessed_coeffs.bin` | `4 × size_t` header = (`count_a`, `count_b`, `unique_a`, `unique_b`) followed by `coeff_t[count_a + count_b]` (A-side list then B-side list, each sorted by constraint `c`, `coeff_t = {u32 m, c, s; fr_t value}`) followed by `u32[unique_a + unique_b]` start-index lists (each list ends with a sentinel = its coefficient count). Derived from zkey §4 by the setup path (`SRS_READ_COEFFS`). |
 | `fres_path` | `fuzzed_msm_results.bin` | one raw `msm_results` struct = `{point_t a, b_g1, c, h; point_fp2_t b_g2}` (sppark Jacobian layouts) holding **−MSM(fuzz)** for A, B1, B2, C, computed at setup with the same deterministic ChaCha8 stream (`h` unused). Size check enforced. |
 
@@ -125,7 +128,7 @@ Constraints this satisfies: the canonical path stays selectable on every build t
 
 | field | meaning |
 |---|---|
-| `witness: *const u8` | `num_vars` consecutive **32-byte little-endian field elements in canonical (non-Montgomery) form**, exactly the `wtns` payload (`wtns_file::FieldElement<32>`); `w[0] = 1`, `w[1..=num_public]` = the public inputs, rest private. MEASURED: every witness-derived MSM passes `mont = false`. |
+| `witness: *const u8` | `num_vars` consecutive **32-byte little-endian field elements in canonical (non-Montgomery) form**, exactly the `wtns` payload (`wtns_file::FieldElement<32>`); `w[0] = 1`, `w[1..=num_public]` = the public inputs, rest private. MEASURED twice: every witness-derived MSM passes `mont = false`, and the fixture's `multiplier2.wtns` reads back as the plain integers `[1, 33, 3, 11]`. |
 | `public_path` | output: `public.json` = JSON array of `num_public` decimal strings, `w[1..=num_public]` |
 | `proof_path` | output: `proof.json` (below) |
 
@@ -171,4 +174,4 @@ The launcher/implementation split maps onto cuda-oxide as: the kernel library cr
 
 ---
 
-**Bottom line.** The boundary is `risc0_groth16_sys::prove` in this fork; both circuits already cross it; the canonical CUDA implementation stays selectable behind a `Groth16Backend` trait with runtime selection; the data contract is fully specified above except for two marks (zkey point encoding: INFERRED; kernel wall-clock shares: UNVERIFIED until a CUDA host runs the corpus). Next: s01/3 captures the stage input/output forms of §4.3; s01/4 and s01/4b implement §3.1.
+**Bottom line.** The boundary is `risc0_groth16_sys::prove` in this fork; both circuits already cross it; the canonical CUDA implementation stays selectable behind a `Groth16Backend` trait with runtime selection; the data contract is fully specified above with one remaining mark (kernel wall-clock shares: UNVERIFIED until a CUDA host runs the corpus). Next: s01/3 captures the stage input/output forms of §4.3; s01/4 and s01/4b implement §3.1.

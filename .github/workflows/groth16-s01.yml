@@ -11,6 +11,7 @@ on:
   push:
     branches: [integration/staging-platform]
     paths:
+      - 'risc0/groth16-core/**'
       - 'risc0/groth16-sys/**'
       - 'risc0/groth16/**'
       - 'groth16_s01/**'
@@ -18,6 +19,7 @@ on:
   pull_request:
     branches: [integration/staging-platform]
     paths:
+      - 'risc0/groth16-core/**'
       - 'risc0/groth16-sys/**'
       - 'risc0/groth16/**'
       - 'groth16_s01/**'
@@ -38,11 +40,17 @@ jobs:
         run: |
           rustup show active-toolchain
           rustup target add aarch64-apple-darwin
+      - name: Shared arithmetic + formats + reference prover (risc0-groth16-core, vs arkworks)
+        run: cargo test -p risc0-groth16-core --locked
+      - name: no_std build of the shared crate (what the cuda-oxide kernels compile)
+        run: cargo check -p risc0-groth16-core --no-default-features --locked
       - name: Unit tests — selection and dispatch properties (default features)
         run: cargo test -p risc0-groth16-sys --locked
+      - name: Reference backend through the boundary, verified by risc0-groth16's verifier
+        run: cargo test -p risc0-groth16-sys --features reference --locked
       - name: Type-check the canonical CUDA path without nvcc
         env:
           RISC0_SKIP_BUILD_KERNELS: "1"
         run: cargo check -p risc0-groth16-sys --features cuda --locked
       - name: Type-check for aarch64-apple-darwin (Metal arm target; no SDK needed for check)
-        run: cargo check -p risc0-groth16-sys --target aarch64-apple-darwin --locked
+        run: cargo check -p risc0-groth16-sys -p risc0-groth16-core --target aarch64-apple-darwin --locked
