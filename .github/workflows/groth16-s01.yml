@@ -74,7 +74,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Toolchain (pinned by rust-toolchain.toml)
-        run: rustup show active-toolchain
+      - name: Toolchain (pinned by rust-toolchain.toml) + protoc for circom-witnesscalc's build script
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler libclang-dev
+          protoc --version
       - name: Type-check the harness (pulls the CPU recursion prover; no artifacts needed to compile)
         run: cargo check -p groth16-s01-harness --locked
