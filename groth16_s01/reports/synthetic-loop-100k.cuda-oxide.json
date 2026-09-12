@@ -1,0 +1,29 @@
+{
+  "case_id": "synthetic-loop-100k",
+  "rewrite_kind": "cuda-oxide",
+  "canonical_verified": {
+    "NotRun": "the case carries no canonical output (synthetic or not captured)"
+  },
+  "canonical_provenance": null,
+  "rewrite_verified": "Yes",
+  "public_inputs_equal": {
+    "NotRun": "no canonical output to compare claims with"
+  },
+  "arms": {
+    "bit_flip": {
+      "Killed": "one bit flipped in each of pi_a, pi_b, pi_c: all rejected"
+    },
+    "cross_claim": {
+      "Killed": "rejected against no second case; used the own digest with bit 0 flipped: verification indicates proof is invalid"
+    },
+    "canonical_answers": {
+      "Killed": "control `reference` answered and verified; registry reported `reference`; a registry without `cuda-oxide` refuses it"
+    },
+    "malformed_input": {
+      "Killed": "rejected before the boundary (bincode): io error: unexpected end of file"
+    }
+  },
+  "derive_seconds": 26.141403369,
+  "prove_seconds": 125.684137484,
+  "oracle": "risc0-groth16 3.0.3 (workspace at the milestone base tag v3.0.4) `Verifier` via risc0-zkvm 3.0.4 `Groth16Receipt::verify_integrity_with_context`"
+}

@@ -79,72 +79,37 @@ impl Groth16Backend for Reference {
 // `random_scalar` alone, so its tests must not run there.
 #[cfg(all(test, feature = "reference"))]
 mod tests {
-    use risc0_groth16::{ProofJson, PublicInputsJson, Verifier, VerifyingKeyJson};
-    use risc0_groth16_core::{prover::verifying_key_json, zkey::parse_wtns};
-
     use super::*;
-    use crate::Registry;
-
-    const ZKEY: &[u8] =
-        include_bytes!("../../../../groth16_proof/circom-compat/test/data/multiplier2_final.zkey");
-    const WTNS: &[u8] =
-        include_bytes!("../../../../groth16_proof/circom-compat/test/data/multiplier2.wtns");
-
-    /// Run the reference backend through the boundary on the fixture and return the
-    /// upstream verifier's verdict on what it wrote.
-    fn prove_through_boundary(witness_bytes: &[u8]) -> anyhow::Result<()> {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("stark_verify_final.zkey"), ZKEY).unwrap();
-        let setup = SetupParams::new(dir.path()).unwrap();
-        let prover = ProverParams::new(dir.path(), witness_bytes.as_ptr()).unwrap();
-        crate::backend::compiled_in().prove(Some("reference"), &prover, &setup)?;
-        let proof: ProofJson =
-            serde_json::from_str(&std::fs::read_to_string(dir.path().join("proof.json")).unwrap())
-                .unwrap();
-        let public = PublicInputsJson {
-            values: serde_json::from_str(
-                &std::fs::read_to_string(dir.path().join("public.json")).unwrap(),
-            )
-            .unwrap(),
-        };
-        let zkey = Zkey::parse(ZKEY).unwrap();
-        let vk: VerifyingKeyJson = serde_json::from_str(&verifying_key_json(&zkey)).unwrap();
-        Verifier::from_json(proof, public, vk)?.verify()
-    }
-
-    fn witness_bytes() -> Vec<u8> {
-        parse_wtns(WTNS)
-            .unwrap()
-            .iter()
-            .flat_map(|w| w.to_le_bytes())
-            .collect()
-    }
+    use crate::{backend::fixture, ProverParams, Registry, SetupParams};
 
     #[test]
     fn reference_backend_output_verifies_under_the_upstream_verifier() {
-        prove_through_boundary(&witness_bytes()).expect("the reference proof must verify");
+        fixture::prove_through_boundary("reference", &fixture::witness_bytes())
+            .expect("the reference proof must verify");
     }
 
     #[test]
     fn an_unsatisfied_witness_yields_a_proof_the_verifier_rejects() {
-        let mut bytes = witness_bytes();
+        let mut bytes = fixture::witness_bytes();
         bytes[32] = 34; // c = 34 while a·b = 33
-        let err = prove_through_boundary(&bytes).expect_err("must not verify");
+        let err =
+            fixture::prove_through_boundary("reference", &bytes).expect_err("must not verify");
         assert!(err.to_string().contains("Invalid proof"), "{err:#}");
     }
 
     #[test]
     fn a_non_field_witness_value_is_rejected_before_proving() {
-        let mut bytes = witness_bytes();
+        let mut bytes = fixture::witness_bytes();
         bytes[32..64].copy_from_slice(&[0xff; 32]);
-        let err = prove_through_boundary(&bytes).expect_err("must be rejected");
+        let err =
+            fixture::prove_through_boundary("reference", &bytes).expect_err("must be rejected");
         assert!(err.to_string().contains("witness value 1"), "{err:#}");
     }
 
     #[test]
     fn a_missing_zkey_is_a_distinct_error() {
         let dir = tempfile::tempdir().unwrap();
-        let bytes = witness_bytes();
+        let bytes = fixture::witness_bytes();
         let setup = SetupParams::new(dir.path()).unwrap();
         let prover = ProverParams::new(dir.path(), bytes.as_ptr()).unwrap();
         let err = Registry::new()
