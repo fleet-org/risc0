@@ -37,6 +37,8 @@
 #![deny(missing_docs)]
 
 pub mod abi;
+#[cfg(feature = "std")]
+pub mod check;
 pub mod kernels;
 #[cfg(feature = "std")]
 pub mod launch;

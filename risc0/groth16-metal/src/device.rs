@@ -66,6 +66,7 @@ struct TransformBuffers {
 }
 
 /// One kernel argument: a buffer or a small constant passed by value.
+#[derive(Clone, Copy)]
 enum Arg<'a> {
     Buf(&'a Buffer),
     Bytes(&'a [u8]),
@@ -220,10 +221,12 @@ impl MetalProver {
         &self,
         kernel: &str,
         points: &Buffer,
+        n_points: usize,
         point_bytes: usize,
         scalars: &[Fr],
         unpack: impl Fn(&[u8]) -> Vec<Jacobian<F>>,
     ) -> Jacobian<F> {
+        assert_eq!(n_points, scalars.len(), "MSM point and scalar counts");
         let n = scalars.len();
         let w = WINDOW_BITS;
         let buckets = (1usize << w) - 1;
@@ -356,11 +359,46 @@ impl MetalProver {
         let pb2 = self.upload(&pack::pack_g2(&zkey.b2));
         let private = &witness[zkey.num_public + 1..];
         let msms = Msms {
-            h: self.msm("bucket_sum_g1", &ph, 64, &quotient, pack::unpack_jac_g1),
-            a: self.msm("bucket_sum_g1", &pa, 64, witness, pack::unpack_jac_g1),
-            b1: self.msm("bucket_sum_g1", &pb1, 64, witness, pack::unpack_jac_g1),
-            b2: self.msm::<Fp2>("bucket_sum_g2", &pb2, 128, witness, pack::unpack_jac_g2),
-            c: self.msm("bucket_sum_g1", &pc, 64, private, pack::unpack_jac_g1),
+            h: self.msm(
+                "bucket_sum_g1",
+                &ph,
+                zkey.h.len(),
+                64,
+                &quotient,
+                pack::unpack_jac_g1,
+            ),
+            a: self.msm(
+                "bucket_sum_g1",
+                &pa,
+                zkey.a.len(),
+                64,
+                witness,
+                pack::unpack_jac_g1,
+            ),
+            b1: self.msm(
+                "bucket_sum_g1",
+                &pb1,
+                zkey.b1.len(),
+                64,
+                witness,
+                pack::unpack_jac_g1,
+            ),
+            b2: self.msm::<Fp2>(
+                "bucket_sum_g2",
+                &pb2,
+                zkey.b2.len(),
+                128,
+                witness,
+                pack::unpack_jac_g2,
+            ),
+            c: self.msm(
+                "bucket_sum_g1",
+                &pc,
+                zkey.c.len(),
+                64,
+                private,
+                pack::unpack_jac_g1,
+            ),
         };
         Ok(assemble(zkey, &msms, r, s))
     }
@@ -372,271 +410,193 @@ impl std::fmt::Debug for MetalProver {
     }
 }
 
-/// One kernel-check result: the kernel name and whether the device agreed
-/// with the Rust bodies on a small input.
-#[derive(Clone, Debug)]
-pub struct KernelCheck {
-    /// Kernel name.
-    pub kernel: &'static str,
-    /// Agreement with `risc0-groth16-core` / the oxide bodies.
-    pub ok: bool,
-    /// What differed, when it did.
-    pub detail: String,
-}
+pub use risc0_groth16_oxide::check::KernelCheck;
 
 impl MetalProver {
-    /// Run every kernel on a small input and compare with the Rust bodies —
-    /// the first thing to run on a Mac, before any proof: it localises an MSL
-    /// arithmetic or layout bug to one kernel.
+    /// Run every kernel, the MSM and a fixture proof on the device against
+    /// the shared cases (`risc0_groth16_oxide::check`) — the first thing to
+    /// run on a Mac, before any proof: it localises an MSL arithmetic, layout
+    /// or orchestration bug to one kernel or one composite step.
     pub fn kernel_check(&self) -> Result<Vec<KernelCheck>> {
-        use risc0_groth16_core::{coeff::GroupedCoeff, ntt};
-        let mut out = Vec::new();
-        let n = 64usize;
-        // deterministic inputs
-        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-        let mut next = || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
+        use risc0_groth16_oxide::check::{
+            first_diff, first_point_diff, proof_diff, Cases, Fixture, WINDOWS,
         };
-        let fr: Vec<Fr> = (0..n).map(|_| Fr::from_u64(next() >> 2)).collect();
-        let fr2: Vec<Fr> = (0..n).map(|_| Fr::from_u64(next() >> 2)).collect();
-        let fr3: Vec<Fr> = (0..n).map(|_| Fr::from_u64(next() >> 2)).collect();
-        let (a, b, c) = (
-            self.upload(&pack::pack_fr(&fr)),
-            self.upload(&pack::pack_fr(&fr2)),
-            self.upload(&pack::pack_fr(&fr3)),
+        let c = Cases::new();
+        let n = c.n;
+        let mut out = Vec::new();
+        let u32s = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>();
+        let fr_out = |kernel: &'static str, len: usize, args: &[Arg<'_>], want: &[Fr]| {
+            let o = self.alloc(len * 32);
+            let mut a: Vec<Arg<'_>> = args.to_vec();
+            a.push(Arg::Buf(&o));
+            self.run(kernel, len, &a);
+            KernelCheck::from_detail(
+                kernel,
+                first_diff(&pack::unpack_fr(&self.read(&o, len * 32)), want),
+            )
+        };
+        let (fb, fb2, fb3) = (
+            self.upload(&pack::pack_fr(&c.fr)),
+            self.upload(&pack::pack_fr(&c.fr2)),
+            self.upload(&pack::pack_fr(&c.fr3)),
         );
-        let outb = self.alloc(n * 32);
-
-        // pointwise_mul
-        self.run(
+        {
+            let cb = self.upload(&pack::pack_coeffs(&c.coeffs));
+            let sb = self.upload(&u32s(&c.starts));
+            out.push(fr_out(
+                "scatter_group",
+                8,
+                &[Arg::Buf(&cb), Arg::Buf(&sb), Arg::Buf(&fb)],
+                &c.scatter(),
+            ));
+        }
+        out.push(fr_out(
             "pointwise_mul",
             n,
-            &[Arg::Buf(&a), Arg::Buf(&b), Arg::Buf(&outb)],
-        );
-        let got = pack::unpack_fr(&self.read(&outb, n * 32));
-        let want: Vec<Fr> = fr.iter().zip(&fr2).map(|(x, y)| x.mul(y)).collect();
-        out.push(KernelCheck {
-            kernel: "pointwise_mul",
-            ok: got == want,
-            detail: first_diff(&got, &want),
-        });
-
-        // pointwise_mul_sub
-        self.run(
+            &[Arg::Buf(&fb), Arg::Buf(&fb2)],
+            &c.pointwise_mul(),
+        ));
+        out.push(fr_out(
             "pointwise_mul_sub",
             n,
-            &[Arg::Buf(&a), Arg::Buf(&b), Arg::Buf(&c), Arg::Buf(&outb)],
-        );
-        let got = pack::unpack_fr(&self.read(&outb, n * 32));
-        let want: Vec<Fr> = fr
-            .iter()
-            .zip(&fr2)
-            .zip(&fr3)
-            .map(|((x, y), z)| x.mul(y).sub(z))
-            .collect();
-        out.push(KernelCheck {
-            kernel: "pointwise_mul_sub",
-            ok: got == want,
-            detail: first_diff(&got, &want),
-        });
-
-        // pointwise_scale (table = fr2, k = fr3[0])
-        let k = pack::fr_bytes(&fr3[0]);
-        self.run(
+            &[Arg::Buf(&fb), Arg::Buf(&fb2), Arg::Buf(&fb3)],
+            &c.pointwise_mul_sub(),
+        ));
+        let n_inv = pack::fr_bytes(&c.n_inv);
+        out.push(fr_out(
             "pointwise_scale",
             n,
-            &[Arg::Buf(&a), Arg::Buf(&b), Arg::Bytes(&k), Arg::Buf(&outb)],
-        );
-        let got = pack::unpack_fr(&self.read(&outb, n * 32));
-        let want: Vec<Fr> = fr
-            .iter()
-            .zip(&fr2)
-            .map(|(x, y)| x.mul(y).mul(&fr3[0]))
-            .collect();
-        out.push(KernelCheck {
-            kernel: "pointwise_scale",
-            ok: got == want,
-            detail: first_diff(&got, &want),
-        });
-
-        // bit_reverse
-        let lg = (n.trailing_zeros()).to_le_bytes();
-        self.run(
+            &[Arg::Buf(&fb), Arg::Buf(&fb2), Arg::Bytes(&n_inv)],
+            &c.pointwise_scale(),
+        ));
+        let lg = c.lg_n.to_le_bytes();
+        out.push(fr_out(
             "bit_reverse",
             n,
-            &[Arg::Buf(&a), Arg::Bytes(&lg), Arg::Buf(&outb)],
+            &[Arg::Buf(&fb), Arg::Bytes(&lg)],
+            &c.bit_reverse(),
+        ));
+        let (len_b, stride_b) = (
+            (c.stage_len as u32).to_le_bytes(),
+            (c.stage_stride as u32).to_le_bytes(),
         );
-        let got = pack::unpack_fr(&self.read(&outb, n * 32));
-        let mut want = fr.clone();
-        ntt::bit_reverse_permute(&mut want);
-        out.push(KernelCheck {
-            kernel: "bit_reverse",
-            ok: got == want,
-            detail: first_diff(&got, &want),
-        });
-
-        // full coset transform through h_to_coset vs the core transform
-        let t = Tables::new(n);
-        let tb = TransformBuffers {
-            forward: self.upload(&pack::pack_fr(&t.forward)),
-            inverse: self.upload(&pack::pack_fr(&t.inverse)),
-            shift: self.upload(&pack::pack_fr(&t.shift_powers)),
-        };
-        let (x, y) = (self.upload(&pack::pack_fr(&fr)), self.alloc(n * 32));
-        let res = self.h_to_coset(&x, &y, n, &t, &tb);
-        let got = pack::unpack_fr(&self.read(res, n * 32));
-        let mut want = fr.clone();
-        ntt::h_to_coset(&mut want, &Fr::two_adic_root(t.lg_n + 1));
-        out.push(KernelCheck {
-            kernel: "ntt_stage (h_to_coset)",
-            ok: got == want,
-            detail: first_diff(&got, &want),
-        });
-
-        // scatter_group: 4 groups of 3 coefficients
-        let coeffs: Vec<GroupedCoeff> = (0..12)
-            .map(|i| GroupedCoeff {
-                signal: (i * 5 % n) as u32,
-                value: fr2[i],
-            })
-            .collect();
-        let starts: Vec<u32> = vec![0, 3, 6, 9, 12];
-        let cb = self.upload(&pack::pack_coeffs(&coeffs));
-        let sb = self.upload(
-            &starts
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect::<Vec<_>>(),
-        );
-        let wb = self.upload(&pack::pack_fr(&fr));
-        let ob = self.alloc(4 * 32);
-        self.run(
-            "scatter_group",
-            4,
-            &[Arg::Buf(&cb), Arg::Buf(&sb), Arg::Buf(&wb), Arg::Buf(&ob)],
-        );
-        let got = pack::unpack_fr(&self.read(&ob, 4 * 32));
-        let want: Vec<Fr> = (0..4)
-            .map(|g| {
-                let mut s = Fr::ZERO;
-                for co in &coeffs[starts[g] as usize..starts[g + 1] as usize] {
-                    s = s.add(&fr[co.signal as usize].mul(&co.value));
-                }
-                s
-            })
-            .collect();
-        out.push(KernelCheck {
-            kernel: "scatter_group",
-            ok: got == want,
-            detail: first_diff(&got, &want),
-        });
-
-        // digits
-        let canonical = self.upload(&pack::pack_canonical(&fr));
-        let db = self.alloc(n * 4);
-        let (window, w) = (3u32, WINDOW_BITS);
-        self.run(
-            "digits",
+        out.push(fr_out(
+            "ntt_stage",
             n,
             &[
-                Arg::Buf(&canonical),
-                Arg::Bytes(&window.to_le_bytes()),
-                Arg::Bytes(&w.to_le_bytes()),
-                Arg::Buf(&db),
+                Arg::Buf(&fb),
+                Arg::Bytes(&len_b),
+                Arg::Buf(&fb2),
+                Arg::Bytes(&stride_b),
             ],
-        );
-        let got: Vec<u32> = self
-            .read(&db, n * 4)
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-            .collect();
-        let want: Vec<u32> = fr
-            .iter()
-            .map(|x| risc0_groth16_core::scalar::digit(&x.to_canonical(), window, w) as u32)
-            .collect();
-        out.push(KernelCheck {
-            kernel: "digits",
-            ok: got == want,
-            detail: if got == want {
-                String::new()
-            } else {
-                format!("{got:?} vs {want:?}")
-            },
-        });
-
-        // bucket sums on G1 and G2 with a few multiples of the generator-derived points from the fixture is not
-        // available here; use points derived from the zkey-free path: scalar multiples of a fixed valid point.
-        let g1: Vec<Affine<Fp>> = {
-            let base = risc0_groth16_core::ec::Jacobian {
-                x: Fp::from_u64(1),
-                y: Fp::from_u64(2),
-                z: Fp::ONE,
-            };
-            (1..=8u64)
-                .map(|k| base.mul(&Fr::from_u64(k)).to_affine())
-                .collect()
-        };
-        let order: Vec<u32> = (0..8).collect();
-        let bstarts: Vec<u32> = vec![0, 3, 5, 8];
-        let pb = self.upload(&pack::pack_g1(&g1));
-        let ordb = self.upload(
-            &order
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect::<Vec<_>>(),
-        );
-        let stb = self.upload(
-            &bstarts
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect::<Vec<_>>(),
-        );
-        let sums = self.alloc(3 * 96);
-        self.run(
-            "bucket_sum_g1",
-            3,
-            &[
-                Arg::Buf(&pb),
-                Arg::Buf(&ordb),
-                Arg::Buf(&stb),
-                Arg::Buf(&sums),
-            ],
-        );
-        let got = pack::unpack_jac_g1(&self.read(&sums, 3 * 96));
-        let want: Vec<Jacobian<Fp>> = (0..3)
-            .map(|b| {
-                let mut acc = Jacobian::INFINITY;
-                for &i in &order[bstarts[b] as usize..bstarts[b + 1] as usize] {
-                    acc = acc.add_affine(&g1[i as usize]);
+            &c.ntt_stage(),
+        ));
+        // digits: full-width scalars, every window
+        {
+            let canonical = self.upload(&pack::pack_canonical(&c.wide));
+            let db = self.alloc(n * 4);
+            let w = WINDOW_BITS.to_le_bytes();
+            let mut bad = Vec::new();
+            for window in 0..WINDOWS {
+                self.run(
+                    "digits",
+                    n,
+                    &[
+                        Arg::Buf(&canonical),
+                        Arg::Bytes(&window.to_le_bytes()),
+                        Arg::Bytes(&w),
+                        Arg::Buf(&db),
+                    ],
+                );
+                let got: Vec<u32> = self
+                    .read(&db, n * 4)
+                    .chunks_exact(4)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                    .collect();
+                if got != c.digits(window) {
+                    bad.push(window);
                 }
-                acc
-            })
-            .collect();
-        let ok = got.iter().zip(&want).all(|(g, w)| g == w);
-        out.push(KernelCheck {
-            kernel: "bucket_sum_g1",
-            ok,
-            detail: if ok {
-                String::new()
-            } else {
-                "bucket sums differ (projective equality)".into()
-            },
-        });
+            }
+            out.push(KernelCheck::from_detail(
+                "digits",
+                if bad.is_empty() {
+                    String::new()
+                } else {
+                    format!("windows {bad:?} differ")
+                },
+            ));
+        }
+        // bucket sums on G1 and G2: infinity input, empty bucket, P + (−P), P + P
+        let (ob, sb) = (self.upload(&u32s(&c.order)), self.upload(&u32s(&c.bstarts)));
+        let buckets = c.buckets();
+        {
+            let pb = self.upload(&pack::pack_g1(&c.g1));
+            let sums = self.alloc(buckets * 96);
+            self.run(
+                "bucket_sum_g1",
+                buckets,
+                &[Arg::Buf(&pb), Arg::Buf(&ob), Arg::Buf(&sb), Arg::Buf(&sums)],
+            );
+            let got = pack::unpack_jac_g1(&self.read(&sums, buckets * 96));
+            out.push(KernelCheck::from_detail(
+                "bucket_sum_g1",
+                first_point_diff(&got, &c.bucket_sums_g1()),
+            ));
+        }
+        {
+            let pb = self.upload(&pack::pack_g2(&c.g2));
+            let sums = self.alloc(buckets * 192);
+            self.run(
+                "bucket_sum_g2",
+                buckets,
+                &[Arg::Buf(&pb), Arg::Buf(&ob), Arg::Buf(&sb), Arg::Buf(&sums)],
+            );
+            let got = pack::unpack_jac_g2(&self.read(&sums, buckets * 192));
+            out.push(KernelCheck::from_detail(
+                "bucket_sum_g2",
+                first_point_diff(&got, &c.bucket_sums_g2()),
+            ));
+        }
+        // end-to-end MSM (digits + host sort + bucket sums + reduction + Horner)
+        {
+            let pb = self.upload(&pack::pack_g1(&c.msm_g1));
+            let got = self.msm(
+                "bucket_sum_g1",
+                &pb,
+                c.msm_g1.len(),
+                64,
+                &c.msm_scalars,
+                pack::unpack_jac_g1,
+            );
+            out.push(KernelCheck::from_detail(
+                "msm (g1)",
+                first_point_diff(&[got], &[c.msm_g1()]),
+            ));
+            let pb2 = self.upload(&pack::pack_g2(&c.msm_g2));
+            let got = self.msm::<Fp2>(
+                "bucket_sum_g2",
+                &pb2,
+                c.msm_g2.len(),
+                128,
+                &c.msm_scalars,
+                pack::unpack_jac_g2,
+            );
+            out.push(KernelCheck::from_detail(
+                "msm (g2)",
+                first_point_diff(&[got], &[c.msm_g2()]),
+            ));
+        }
+        // a whole proof on the in-tree fixture, fixed blinding, byte-identical to the core prover
+        {
+            let f = Fixture::multiplier2();
+            out.push(match self.prove(&f.zkey, &f.witness, &f.r, &f.s) {
+                Ok(p) => KernelCheck::from_detail("proof (fixture)", proof_diff(&p, &f)),
+                Err(e) => {
+                    KernelCheck::from_detail("proof (fixture)", format!("prove failed: {e:#}"))
+                }
+            });
+        }
         Ok(out)
-    }
-}
-
-fn first_diff(got: &[Fr], want: &[Fr]) -> String {
-    match got.iter().zip(want).position(|(g, w)| g != w) {
-        None if got.len() == want.len() => String::new(),
-        None => format!("length {} vs {}", got.len(), want.len()),
-        Some(i) => format!(
-            "first difference at index {i}: got {:?}, want {:?}",
-            got[i], want[i]
-        ),
     }
 }
 

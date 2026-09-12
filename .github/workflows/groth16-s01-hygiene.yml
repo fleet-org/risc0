@@ -37,7 +37,7 @@ jobs:
   hygiene:
     name: commit gate on the PR range
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,9 +50,14 @@ jobs:
         run: cargo install cargo-sort --version '^1.0' --locked
       - name: CUDA 13 headers (clippy on the CUDA arm's host crate needs cuda-bindings to build)
         run: groth16_s01/scripts/cuda-headers.sh "$RUNNER_TEMP/cuda" >> "$GITHUB_ENV"
+      - name: Metal shaders parse as C++14 against the stub, reserved type names poisoned
+        run: |
+          groth16_s01/scripts/msl-check.sh --self-test
+          groth16_s01/scripts/msl-check.sh
       - name: precommit.sh on the range
         env:
           GH_TOKEN: ${{ github.token }}
+          PRECOMMIT_HARNESS_CLIPPY: "1"
         run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
             range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"

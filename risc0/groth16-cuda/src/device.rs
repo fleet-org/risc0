@@ -25,7 +25,7 @@ use cuda_core::simt::{
 use risc0_groth16_core::{
     coeff::GroupedCoeff,
     ec::{Affine, Jacobian},
-    field::{Field, Fp, Fr},
+    field::{Field, Fr},
     fp2::Fp2,
     prover::{
         assemble, counting_sort_by_digit, horner, reduce_buckets, CoefficientGroups, Msms, Proof,
@@ -34,12 +34,12 @@ use risc0_groth16_core::{
     zkey::Zkey,
 };
 use risc0_groth16_oxide::{
-    abi, kernels,
+    abi,
     pipeline::WINDOW_BITS,
     schedule::{self, Buf, Step, Twiddles},
 };
 
-use crate::{g2_generator, module::ModuleSource};
+use crate::module::ModuleSource;
 
 /// A `#[repr(C)]` record of `risc0-groth16-core` as plain device data.
 /// (`DeviceCopy` is cuda-core's trait and the records are core's types, so
@@ -267,6 +267,7 @@ impl CudaProver {
         points: &Buffer<Affine<F>>,
         scalars: &[Fr],
     ) -> Result<Jacobian<F>> {
+        assert_eq!(points.len(), scalars.len(), "MSM point and scalar counts");
         let n = scalars.len();
         let w = WINDOW_BITS;
         let buckets = (1usize << w) - 1;
@@ -404,217 +405,127 @@ impl std::fmt::Debug for CudaProver {
     }
 }
 
-/// One kernel-check result: the kernel name and whether the device agreed
-/// with the Rust bodies on a small input.
-#[derive(Clone, Debug)]
-pub struct KernelCheck {
-    /// Kernel name (an [`abi`] constant).
-    pub kernel: &'static str,
-    /// Agreement with `risc0_groth16_oxide::kernels`.
-    pub ok: bool,
-    /// What differed, when it did.
-    pub detail: String,
-}
-
-/// The BN254 G2 generator as a core point (see [`g2_generator`]).
-pub fn g2_generator() -> Affine<Fp2> {
-    Affine::new(
-        Fp2::new(
-            Fp::from_canonical(g2_generator::G2_GENERATOR_X_C0),
-            Fp::from_canonical(g2_generator::G2_GENERATOR_X_C1),
-        ),
-        Fp2::new(
-            Fp::from_canonical(g2_generator::G2_GENERATOR_Y_C0),
-            Fp::from_canonical(g2_generator::G2_GENERATOR_Y_C1),
-        ),
-    )
-}
-
-fn first_diff<T: PartialEq + std::fmt::Debug>(got: &[T], want: &[T]) -> String {
-    if got.len() != want.len() {
-        return format!("{} outputs, expected {}", got.len(), want.len());
-    }
-    match got.iter().zip(want).position(|(g, w)| g != w) {
-        Some(i) => format!(
-            "first difference at index {i}: got {:?}, want {:?}",
-            got[i], want[i]
-        ),
-        None => String::new(),
-    }
-}
+pub use risc0_groth16_oxide::check::KernelCheck;
 
 impl CudaProver {
-    /// Run every kernel of the ABI on a small deterministic input and compare
-    /// with the Rust bodies — the first thing to run on a CUDA host, before
-    /// any proof: it localises a codegen, layout or ABI mismatch to one kernel.
+    /// Run every kernel of the ABI, the MSM and a fixture proof against the
+    /// shared cases (`risc0_groth16_oxide::check`) — the first thing to run
+    /// on a CUDA host, before any proof: it localises a codegen, layout, ABI
+    /// or orchestration mismatch to one kernel or one composite step.
     pub fn kernel_check(&self) -> Result<Vec<KernelCheck>> {
-        let mut out = Vec::with_capacity(abi::KERNELS.len());
-        let n = 64usize;
-        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-        let mut next = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
+        use risc0_groth16_oxide::check::{
+            first_diff, first_point_diff, proof_diff, Cases, Fixture, WINDOWS,
         };
-        let fr: Vec<Fr> = (0..n).map(|_| Fr::from_u64(next() >> 2)).collect();
-        let fr2: Vec<Fr> = (0..n).map(|_| Fr::from_u64(next() >> 2)).collect();
-        let fr3: Vec<Fr> = (0..n).map(|_| Fr::from_u64(next() >> 2)).collect();
+        let c = Cases::new();
+        let n = c.n;
+        let mut out = Vec::with_capacity(abi::KERNELS.len() + 3);
         let mut record = |kernel: &'static str, r: Result<String>| {
             out.push(match r {
-                Ok(detail) => KernelCheck {
-                    kernel,
-                    ok: detail.is_empty(),
-                    detail,
-                },
-                Err(e) => KernelCheck {
-                    kernel,
-                    ok: false,
-                    detail: format!("launch failed: {e:#}"),
-                },
+                Ok(detail) => KernelCheck::from_detail(kernel, detail),
+                Err(e) => KernelCheck::from_detail(kernel, format!("launch failed: {e:#}")),
             })
         };
-        let check_fr = |kernel: &str, want: &[Fr], inputs: Vec<Arg>| -> Result<String> {
+        let fr_out = |kernel: &str, want: &[Fr], inputs: Vec<Arg>| -> Result<String> {
             let o: Buffer<Fr> = self.alloc(want.len())?;
             self.run(kernel, ptr(&o), want.len(), &inputs)?;
             Ok(first_diff(&self.read(&o)?, want))
         };
-
-        // scatter_group: 8 groups of 8 coefficients
-        {
-            let coeffs: Vec<GroupedCoeff> = (0..n)
-                .map(|j| GroupedCoeff {
-                    signal: ((j * 7) % n) as u32,
-                    value: fr2[j],
-                })
-                .collect();
-            let starts: Vec<u32> = (0..=8).map(|g| g * 8).collect();
-            let want: Vec<Fr> = (0..8)
-                .map(|g| kernels::scatter_group(g, &coeffs, &starts, &fr))
-                .collect();
-            record(
-                abi::SCATTER_GROUP,
-                (|| {
-                    let (cb, sb, wb) = (
-                        self.upload(&coeffs)?,
-                        self.upload(&starts)?,
-                        self.upload(&fr)?,
-                    );
-                    check_fr(
-                        abi::SCATTER_GROUP,
-                        &want,
-                        [&slice(&cb)[..], &slice(&sb), &slice(&wb)].concat(),
-                    )
-                })(),
-            );
-        }
-        let (ab, bb, cb) = (self.upload(&fr)?, self.upload(&fr2)?, self.upload(&fr3)?);
-        {
-            let want: Vec<Fr> = (0..n)
-                .map(|i| kernels::pointwise_mul(i, &fr, &fr2))
-                .collect();
-            record(
+        let (fb, fb2, fb3) = (
+            self.upload(&c.fr)?,
+            self.upload(&c.fr2)?,
+            self.upload(&c.fr3)?,
+        );
+        record(
+            abi::SCATTER_GROUP,
+            (|| {
+                let (cb, sb) = (self.upload(&c.coeffs)?, self.upload(&c.starts)?);
+                fr_out(
+                    abi::SCATTER_GROUP,
+                    &c.scatter(),
+                    [&slice(&cb)[..], &slice(&sb), &slice(&fb)].concat(),
+                )
+            })(),
+        );
+        record(
+            abi::POINTWISE_MUL,
+            fr_out(
                 abi::POINTWISE_MUL,
-                check_fr(
-                    abi::POINTWISE_MUL,
-                    &want,
-                    [&slice(&ab)[..], &slice(&bb)].concat(),
-                ),
-            );
-        }
-        {
-            let want: Vec<Fr> = (0..n)
-                .map(|i| kernels::pointwise_mul_sub(i, &fr, &fr2, &fr3))
-                .collect();
-            record(
+                &c.pointwise_mul(),
+                [&slice(&fb)[..], &slice(&fb2)].concat(),
+            ),
+        );
+        record(
+            abi::POINTWISE_MUL_SUB,
+            fr_out(
                 abi::POINTWISE_MUL_SUB,
-                check_fr(
-                    abi::POINTWISE_MUL_SUB,
-                    &want,
-                    [&slice(&ab)[..], &slice(&bb), &slice(&cb)].concat(),
-                ),
-            );
-        }
-        {
-            let n_inv = fr3[0];
-            let want: Vec<Fr> = (0..n)
-                .map(|i| kernels::pointwise_scale(i, &fr, &fr2).mul(&n_inv))
-                .collect();
-            record(
+                &c.pointwise_mul_sub(),
+                [&slice(&fb)[..], &slice(&fb2), &slice(&fb3)].concat(),
+            ),
+        );
+        record(
+            abi::POINTWISE_SCALE,
+            fr_out(
                 abi::POINTWISE_SCALE,
-                check_fr(
-                    abi::POINTWISE_SCALE,
-                    &want,
-                    [&slice(&ab)[..], &slice(&bb), &[Arg::Fr(n_inv)]].concat(),
-                ),
-            );
-        }
-        {
-            let lg = n.trailing_zeros();
-            let want: Vec<Fr> = (0..n).map(|i| kernels::bit_reverse(i, &fr, lg)).collect();
-            record(
+                &c.pointwise_scale(),
+                [&slice(&fb)[..], &slice(&fb2), &[Arg::Fr(c.n_inv)]].concat(),
+            ),
+        );
+        record(
+            abi::BIT_REVERSE,
+            fr_out(
                 abi::BIT_REVERSE,
-                check_fr(
-                    abi::BIT_REVERSE,
-                    &want,
-                    [&slice(&ab)[..], &[Arg::U32(lg)]].concat(),
-                ),
-            );
-        }
-        {
-            let (len, stride) = (8usize, n / 8);
-            let want: Vec<Fr> = (0..n)
-                .map(|i| kernels::ntt_stage(i, &fr, len, &fr2, stride))
-                .collect();
-            record(
+                &c.bit_reverse(),
+                [&slice(&fb)[..], &[Arg::U32(c.lg_n)]].concat(),
+            ),
+        );
+        record(
+            abi::NTT_STAGE,
+            fr_out(
                 abi::NTT_STAGE,
-                check_fr(
-                    abi::NTT_STAGE,
-                    &want,
-                    [
-                        &slice(&ab)[..],
-                        &[Arg::U32(len as u32)],
-                        &slice(&bb),
-                        &[Arg::U32(stride as u32)],
-                    ]
-                    .concat(),
-                ),
-            );
-        }
-        {
-            let canonical: Vec<[u64; 4]> = fr.iter().map(Fr::to_canonical).collect();
-            let (window, w) = (3u32, WINDOW_BITS);
-            let want: Vec<u32> = (0..n)
-                .map(|i| kernels::digit(i, &canonical, window, w))
-                .collect();
-            record(
-                abi::DIGITS,
-                (|| {
-                    let sb = self.upload(&canonical)?;
-                    let o: Buffer<u32> = self.alloc(n)?;
+                &c.ntt_stage(),
+                [
+                    &slice(&fb)[..],
+                    &[Arg::U32(c.stage_len as u32)],
+                    &slice(&fb2),
+                    &[Arg::U32(c.stage_stride as u32)],
+                ]
+                .concat(),
+            ),
+        );
+        // digits: full-width scalars, every window
+        record(
+            abi::DIGITS,
+            (|| {
+                let sb = self.upload(&c.wide_canonical())?;
+                let o: Buffer<u32> = self.alloc(n)?;
+                let mut bad = Vec::new();
+                for window in 0..WINDOWS {
                     self.run(
                         abi::DIGITS,
                         ptr(&o),
                         n,
-                        &[&slice(&sb)[..], &[Arg::U32(window), Arg::U32(w)]].concat(),
+                        &[&slice(&sb)[..], &[Arg::U32(window), Arg::U32(WINDOW_BITS)]].concat(),
                     )?;
-                    Ok(first_diff(&self.read(&o)?, &want))
-                })(),
-            );
-        }
-        // bucket sums: 8 multiples of a generator, 3 buckets
-        let order: Vec<u32> = (0..8).collect();
-        let starts: Vec<u32> = vec![0, 3, 5, 8];
+                    if self.read(&o)? != c.digits(window) {
+                        bad.push(window);
+                    }
+                }
+                Ok(if bad.is_empty() {
+                    String::new()
+                } else {
+                    format!("windows {bad:?} differ")
+                })
+            })(),
+        );
+        // bucket sums on G1 and G2: infinity input, empty bucket, P + (−P), P + P
         fn bucket_check<F: Field + Copy + std::fmt::Debug>(
             p: &CudaProver,
             kernel: &str,
             points: &[Affine<F>],
             order: &[u32],
             starts: &[u32],
+            want: &[Jacobian<F>],
         ) -> Result<String> {
-            let want: Vec<Jacobian<F>> = (0..starts.len() - 1)
-                .map(|b| kernels::bucket_sum(b, points, order, starts))
-                .collect();
             let (pb, ob, sb) = (p.upload(points)?, p.upload(order)?, p.upload(starts)?);
             let o: Buffer<Jacobian<F>> = p.alloc(want.len())?;
             p.run(
@@ -623,33 +534,55 @@ impl CudaProver {
                 want.len(),
                 &[&slice(&pb)[..], &slice(&ob), &slice(&sb)].concat(),
             )?;
-            let got = p.read(&o)?;
-            // projective equality: compare affine forms
-            let ga: Vec<Affine<F>> = got.iter().map(Jacobian::to_affine).collect();
-            let wa: Vec<Affine<F>> = want.iter().map(Jacobian::to_affine).collect();
-            Ok(match ga.iter().zip(&wa).position(|(g, w)| g != w) {
-                Some(b) => format!("bucket {b} differs (affine forms compared)"),
-                None => String::new(),
-            })
+            Ok(first_point_diff(&p.read(&o)?, want))
         }
-        {
-            let base = Affine::new(Fp::from_u64(1), Fp::from_u64(2)).to_jacobian();
-            let g1: Vec<Affine<Fp>> = (1..=8u64)
-                .map(|k| base.mul(&Fr::from_u64(k)).to_affine())
-                .collect();
-            record(
+        record(
+            abi::BUCKET_SUM_G1,
+            bucket_check(
+                self,
                 abi::BUCKET_SUM_G1,
-                bucket_check(self, abi::BUCKET_SUM_G1, &g1, &order, &starts),
-            );
-        }
-        {
-            let base = g2_generator().to_jacobian();
-            let g2: Vec<Affine<Fp2>> = (1..=8u64)
-                .map(|k| base.mul(&Fr::from_u64(k)).to_affine())
-                .collect();
-            record(
+                &c.g1,
+                &c.order,
+                &c.bstarts,
+                &c.bucket_sums_g1(),
+            ),
+        );
+        record(
+            abi::BUCKET_SUM_G2,
+            bucket_check(
+                self,
                 abi::BUCKET_SUM_G2,
-                bucket_check(self, abi::BUCKET_SUM_G2, &g2, &order, &starts),
+                &c.g2,
+                &c.order,
+                &c.bstarts,
+                &c.bucket_sums_g2(),
+            ),
+        );
+        // end-to-end MSM (digits + host sort + bucket sums + reduction + Horner)
+        record(
+            "msm (g1)",
+            (|| {
+                let pb = self.upload(&c.msm_g1)?;
+                let got = self.msm(abi::BUCKET_SUM_G1, &pb, &c.msm_scalars)?;
+                Ok(first_point_diff(&[got], &[c.msm_g1()]))
+            })(),
+        );
+        record(
+            "msm (g2)",
+            (|| {
+                let pb = self.upload(&c.msm_g2)?;
+                let got = self.msm::<Fp2>(abi::BUCKET_SUM_G2, &pb, &c.msm_scalars)?;
+                Ok(first_point_diff(&[got], &[c.msm_g2()]))
+            })(),
+        );
+        // a whole proof on the in-tree fixture, fixed blinding, byte-identical to the core prover
+        {
+            let f = Fixture::multiplier2();
+            record(
+                "proof (fixture)",
+                self.prove(&f.zkey, &f.witness, &f.r, &f.s)
+                    .map(|p| proof_diff(&p, &f))
+                    .map_err(|e| anyhow!("prove failed: {e:#}")),
             );
         }
         Ok(out)

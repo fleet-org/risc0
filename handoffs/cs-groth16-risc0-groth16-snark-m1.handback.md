@@ -30,8 +30,8 @@ Every claim in those documents is marked MEASURED / INFERRED / UNVERIFIED; every
 | item | blocked on | what unblocks it |
 |---|---|---|
 | s01/3 corpus (assertions 2 and 3 on production data) | production access (E1) | run `CORPUS.md` §2 where the agent's `DATABASE_URL`/`S3_*` are set; freeze as a GitHub Release on this fork |
-| s01/4 device half of the CUDA arm | a CUDA 13 host with the nightly + `cargo oxide` (E2) | `groth16_s01/cuda-kernels/README.md` in order: build the device module, run `groth16-cuda-kernel-check` (names the first kernel that differs from the Rust bodies), `cargo test -p risc0-groth16-sys --features cuda-oxide`, then `harness run … cuda-oxide --control canonical`; the host side, ABI and schedule are in place and type-checked |
-| s01/4b Metal execution | a macOS 13+ Apple Silicon host (E3) | `cargo run -p risc0-groth16-metal --bin groth16-metal-kernel-check`, then `harness run … metal --control reference` |
+| s01/4 device half of the CUDA arm | a CUDA 13 host with the nightly + `cargo oxide` (E2) | `groth16_s01/cuda-kernels/README.md` in order: `cargo oxide build --arch <sm>` (product `risc0_groth16_cuda_kernels.ptx`), run `groth16-cuda-kernel-check` (names the first kernel that differs from the Rust bodies), `cargo test -p risc0-groth16-sys --features cuda-oxide`, then `harness run … cuda-oxide --control canonical`; the host side, ABI and schedule are in place and type-checked |
+| s01/4b Metal execution | a macOS 13+ Apple Silicon host (E3) | `cargo run -p risc0-groth16-metal --bin groth16-metal-kernel-check` first (names the first kernel that differs from the Rust bodies), then `cargo test -p risc0-groth16-sys --features metal`, then `cargo run -p groth16-s01-harness --features metal -- run <case> metal --control reference`; the arm is selectable behind the boundary since C9 |
 | s01/6 on-chain e2e + timing | the deployment (and fleet-org/fleet#1950 or production authorization) | out of any CRCS's reach; needs root-CP |
 
 ## What the artifacts do not show (learned the hard way)

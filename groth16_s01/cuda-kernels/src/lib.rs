@@ -22,38 +22,34 @@
 //!
 //! The parameter list of every kernel is the ABI's, in the ABI's order
 //! (output first, then `n`, then the body's inputs with each slice as a
-//! `(ptr, len)` pair). The host (`risc0-groth16-cuda`) passes exactly that.
-//!
-//! TWO POINTS ARE UNVERIFIED and are the first things to settle on a CUDA host
-//! (both are one-line fixes if wrong; the ABI does not move):
-//! 1. the intrinsic that yields the global thread index ([`gid`]);
-//! 2. whether `#[kernel]` accepts raw-pointer parameters as written; if it
-//!    wants cuda-oxide's own slice types, wrap the pointer/len pairs there and
-//!    keep the ABI order.
+//! `(ptr, len: u32)` pair). cuda-oxide passes a raw pointer as one `.u64`
+//! param, a `u32` as one `.u32` param and a `#[repr(C)]` struct by value as
+//! one byval param (cuda-oxide `crates/mir-lower/src/convert/types/func_abi.rs`),
+//! which is what the host (`risc0-groth16-cuda`) stages per parameter. The
+//! shape is the pinned examples' (`examples/interop_cubin_identity`,
+//! `examples/cutile_inter_kernel/simt`): raw-pointer kernels in a
+//! `#[cuda_module]`, `thread::index_1d().get()` for the global index of a
+//! 1-D launch, and the `n` bound check.
 
 #![no_std]
 
-use cuda_macros::{cuda_module, kernel};
+use cuda_device::{cuda_module, kernel, thread};
 
-/// Global thread index along x. UNVERIFIED: the exact intrinsic path in the
-/// pinned cuda-oxide tree; see `crates/cuda-device` and the examples there.
-#[inline(always)]
-fn gid() -> u32 {
-    cuda_device::intrinsics::block_idx_x() * cuda_device::intrinsics::block_dim_x()
-        + cuda_device::intrinsics::thread_idx_x()
-}
-
-/// A device slice from an ABI `(ptr, len)` pair.
+/// A device slice from an ABI `(ptr, len)` pair — a plain helper (the collector
+/// compiles every function a kernel reaches; only thread-index readers need
+/// `#[device]`).
 ///
 /// # Safety
 /// `ptr` must point at `len` initialised `T`s that outlive the launch.
 #[inline(always)]
 unsafe fn sl<'a, T>(ptr: *const T, len: u32) -> &'a [T] {
-    core::slice::from_raw_parts(ptr, len as usize)
+    // SAFETY: the caller's contract, restated from the ABI.
+    unsafe { core::slice::from_raw_parts(ptr, len as usize) }
 }
 
 #[cuda_module]
 pub mod groth16 {
+    use cuda_device::{kernel, thread};
     use risc0_groth16_core::{
         ec::{Affine, Jacobian},
         field::{Fp, Fr},
@@ -61,7 +57,7 @@ pub mod groth16 {
     };
     use risc0_groth16_oxide::{abi::GroupedCoeff, kernels};
 
-    use super::{gid, sl};
+    use super::sl;
 
     /// `abi::SCATTER_GROUP`
     #[kernel]
@@ -75,14 +71,10 @@ pub mod groth16 {
         witness: *const Fr,
         witness_len: u32,
     ) {
-        let i = gid();
-        if i < n {
-            *out.add(i as usize) = kernels::scatter_group(
-                i as usize,
-                sl(coeffs, coeffs_len),
-                sl(starts, starts_len),
-                sl(witness, witness_len),
-            );
+        let i = thread::index_1d().get();
+        if i < n as usize {
+            // SAFETY: the host sized `out` for `n` outputs and the inputs per the ABI.
+            unsafe { *out.add(i) = kernels::scatter_group(i, sl(coeffs, coeffs_len), sl(starts, starts_len), sl(witness, witness_len)) };
         }
     }
 
@@ -96,9 +88,10 @@ pub mod groth16 {
         b: *const Fr,
         b_len: u32,
     ) {
-        let i = gid();
-        if i < n {
-            *out.add(i as usize) = kernels::pointwise_mul(i as usize, sl(a, a_len), sl(b, b_len));
+        let i = thread::index_1d().get();
+        if i < n as usize {
+            // SAFETY: as above.
+            unsafe { *out.add(i) = kernels::pointwise_mul(i, sl(a, a_len), sl(b, b_len)) };
         }
     }
 
@@ -114,14 +107,15 @@ pub mod groth16 {
         c: *const Fr,
         c_len: u32,
     ) {
-        let i = gid();
-        if i < n {
-            *out.add(i as usize) =
-                kernels::pointwise_mul_sub(i as usize, sl(a, a_len), sl(b, b_len), sl(c, c_len));
+        let i = thread::index_1d().get();
+        if i < n as usize {
+            // SAFETY: as above.
+            unsafe { *out.add(i) = kernels::pointwise_mul_sub(i, sl(a, a_len), sl(b, b_len), sl(c, c_len)) };
         }
     }
 
-    /// `abi::POINTWISE_SCALE`: `a[i]·k[i]·n_inv`.
+    /// `abi::POINTWISE_SCALE`: `a[i]·k[i]·n_inv`. `n_inv` crosses as one
+    /// 32-byte byval param (`Fr` is `#[repr(C)]`, not `repr(transparent)`).
     #[kernel]
     pub unsafe fn pointwise_scale(
         out: *mut Fr,
@@ -132,19 +126,20 @@ pub mod groth16 {
         k_len: u32,
         n_inv: Fr,
     ) {
-        let i = gid();
-        if i < n {
-            *out.add(i as usize) =
-                kernels::scale(0, &[kernels::pointwise_scale(i as usize, sl(a, a_len), sl(k, k_len))], &n_inv);
+        let i = thread::index_1d().get();
+        if i < n as usize {
+            // SAFETY: as above.
+            unsafe { *out.add(i) = kernels::scale(0, &[kernels::pointwise_scale(i, sl(a, a_len), sl(k, k_len))], &n_inv) };
         }
     }
 
     /// `abi::BIT_REVERSE`
     #[kernel]
     pub unsafe fn bit_reverse(out: *mut Fr, n: u32, a: *const Fr, a_len: u32, lg_n: u32) {
-        let i = gid();
-        if i < n {
-            *out.add(i as usize) = kernels::bit_reverse(i as usize, sl(a, a_len), lg_n);
+        let i = thread::index_1d().get();
+        if i < n as usize {
+            // SAFETY: as above.
+            unsafe { *out.add(i) = kernels::bit_reverse(i, sl(a, a_len), lg_n) };
         }
     }
 
@@ -160,15 +155,10 @@ pub mod groth16 {
         twiddles_len: u32,
         stride: u32,
     ) {
-        let i = gid();
-        if i < n {
-            *out.add(i as usize) = kernels::ntt_stage(
-                i as usize,
-                sl(a, a_len),
-                len as usize,
-                sl(twiddles, twiddles_len),
-                stride as usize,
-            );
+        let i = thread::index_1d().get();
+        if i < n as usize {
+            // SAFETY: as above.
+            unsafe { *out.add(i) = kernels::ntt_stage(i, sl(a, a_len), len as usize, sl(twiddles, twiddles_len), stride as usize) };
         }
     }
 
@@ -182,9 +172,10 @@ pub mod groth16 {
         window: u32,
         w: u32,
     ) {
-        let i = gid();
-        if i < n {
-            *out.add(i as usize) = kernels::digit(i as usize, sl(scalars, scalars_len), window, w);
+        let i = thread::index_1d().get();
+        if i < n as usize {
+            // SAFETY: as above.
+            unsafe { *out.add(i) = kernels::digit(i, sl(scalars, scalars_len), window, w) };
         }
     }
 
@@ -200,14 +191,10 @@ pub mod groth16 {
         starts: *const u32,
         starts_len: u32,
     ) {
-        let b = gid();
-        if b < n {
-            *out.add(b as usize) = kernels::bucket_sum(
-                b as usize,
-                sl(points, points_len),
-                sl(order, order_len),
-                sl(starts, starts_len),
-            );
+        let b = thread::index_1d().get();
+        if b < n as usize {
+            // SAFETY: as above.
+            unsafe { *out.add(b) = kernels::bucket_sum(b, sl(points, points_len), sl(order, order_len), sl(starts, starts_len)) };
         }
     }
 
@@ -223,14 +210,10 @@ pub mod groth16 {
         starts: *const u32,
         starts_len: u32,
     ) {
-        let b = gid();
-        if b < n {
-            *out.add(b as usize) = kernels::bucket_sum(
-                b as usize,
-                sl(points, points_len),
-                sl(order, order_len),
-                sl(starts, starts_len),
-            );
+        let b = thread::index_1d().get();
+        if b < n as usize {
+            // SAFETY: as above.
+            unsafe { *out.add(b) = kernels::bucket_sum(b, sl(points, points_len), sl(order, order_len), sl(starts, starts_len)) };
         }
     }
 }

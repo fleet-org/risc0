@@ -22,7 +22,7 @@ bad() { fail=1; say "FAIL: $*"; }
 
 # ---- what to look at -------------------------------------------------------------------------
 mode=${1:-}; shift || true
-files=(); msgs=(); added=""
+files=(); msgs=(); merges=(); added=""
 case "$mode" in
   --install)
     for h in pre-commit commit-msg; do
@@ -39,7 +39,11 @@ case "$mode" in
     range=$1
     mapfile -t files < <(git diff --name-only --diff-filter=ACMR "$range")
     added=$(git diff -U0 --no-color --diff-filter=ACMR "$range" -- . ":!$SELF" | grep -E '^\+' | grep -vE '^\+\+\+ ' || true)
-    while IFS= read -r sha; do msgs+=("$(git log -1 --format=%B "$sha")"); done < <(git rev-list --reverse "$range") ;;
+    # merge commits carry GitHub's subject, not a conventional one: privacy-scanned, shape-exempt
+    while IFS= read -r sha; do
+      if [ "$(git rev-list --parents -n1 "$sha" | wc -w)" -gt 2 ]; then merges+=("$(git log -1 --format=%B "$sha")")
+      else msgs+=("$(git log -1 --format=%B "$sha")"); fi
+    done < <(git rev-list --reverse "$range") ;;
   *) say "usage: $SELF --staged | --msg <file> | --range <a>..<b> | --install"; exit 2 ;;
 esac
 exists() { [ -f "$1" ] && ! git check-ignore -q "$1"; }
@@ -60,6 +64,7 @@ scan() { # $1 = label, stdin = text
 }
 [ -n "$added" ] && printf '%s\n' "$added" | scan "added lines"
 for i in "${!msgs[@]}"; do printf '%s\n' "${msgs[$i]}" | scan "commit message $((i+1))"; done
+for i in "${!merges[@]}"; do printf '%s\n' "${merges[$i]}" | scan "merge commit message $((i+1))"; done
 
 # ---- 2. links in markdown: full-SHA permalinks, well-formed, and resolving ------------------------
 # (github-skill VC-011 / TRAP-012 / I-GHW-005; milestone rule I-G16-008)
@@ -103,6 +108,15 @@ for f in "${present[@]}"; do
   esac
 done
 
+# ---- 3b. Metal shaders: a C++ syntax pass with MSL's type names poisoned (I-G16-019) ------------
+for f in "${present[@]}"; do
+  case "$f" in risc0/groth16-metal/src/*.metal|groth16_s01/scripts/msl-check.sh|groth16_s01/scripts/msl-stub/*)
+    groth16_s01/scripts/msl-check.sh --self-test >/dev/null 2>&1 || bad "msl-check self-test failed"
+    groth16_s01/scripts/msl-check.sh >/dev/null 2>&1 || bad "Metal shaders: run groth16_s01/scripts/msl-check.sh"
+    break ;;
+  esac
+done
+
 # ---- 4. rustfmt, cargo-sort, license headers, clippy — on the crates touched ---------------------
 crate_of() { case "$1" in
   risc0/groth16-core/*)  echo risc0-groth16-core ;;  risc0/groth16-oxide/*) echo risc0-groth16-oxide ;;
@@ -124,6 +138,9 @@ if [ $rs = 1 ] && [ "${PRECOMMIT_NO_LINT:-0}" != 1 ]; then
     sysfeats=reference,oxide-cpu
     if [ -n "${CUDA_HOME:-}" ]; then sysfeats=$sysfeats,cuda-oxide
     elif [ "$c" = risc0-groth16-cuda ]; then say "note: CUDA_HOME unset — clippy on $c skipped (CI runs it)"; continue; fi
+    # the harness pulls the CPU recursion prover: a cold clippy is a 30-minute compile, so it is opt-in
+    # (PRECOMMIT_HARNESS_CLIPPY=1, set in CI); the owning session checks it in the harness target dir
+    if [ "$c" = groth16-s01-harness ] && [ "${PRECOMMIT_HARNESS_CLIPPY:-0}" != 1 ]; then say "note: clippy on $c skipped (PRECOMMIT_HARNESS_CLIPPY=1 to run; CI runs it)"; continue; fi
     case $c in risc0-groth16-sys) feats=(--features "$sysfeats") ;; *) feats=() ;; esac
     if ! out=$(cargo clippy -p "$c" "${feats[@]}" --all-targets --locked -- -D warnings 2>&1); then
       bad "clippy ($c):"$'\n'"$(printf '%s\n' "$out" | grep -E '^(error|warning)' | head -5)"

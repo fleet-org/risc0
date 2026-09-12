@@ -306,15 +306,15 @@ kernel void bit_reverse(device const Fr* a [[buffer(0)]], constant uint& lg_n [[
 kernel void ntt_stage(device const Fr* a [[buffer(0)]], constant uint& len [[buffer(1)]],
                       device const Fr* tw [[buffer(2)]], constant uint& stride [[buffer(3)]],
                       device Fr* out [[buffer(4)]], uint i [[thread_position_in_grid]]) {
-    uint half = len / 2;
+    uint hl = len / 2;
     uint k = i % len;
-    if (k < half) {
+    if (k < hl) {
         Fr u = a[i];
-        Fr v = fr_mul(a[i + half], tw[k * stride]);
+        Fr v = fr_mul(a[i + hl], tw[k * stride]);
         out[i] = fr_add(u, v);
     } else {
-        Fr u = a[i - half];
-        Fr v = fr_mul(a[i], tw[(k - half) * stride]);
+        Fr u = a[i - hl];
+        Fr v = fr_mul(a[i], tw[(k - hl) * stride]);
         out[i] = fr_sub(u, v);
     }
 }
