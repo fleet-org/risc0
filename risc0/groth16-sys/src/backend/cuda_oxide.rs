@@ -50,7 +50,7 @@ impl Groth16Backend for CudaOxide {
             let groups = CoefficientGroups::from_zkey(&zkey);
             zkey.coefficients = Vec::new();
             let device = CudaProver::new(ModuleSource::from_env()?)?;
-            let resident = device.prepare(&zkey, &groups)?;
+            let resident = device.prepare_owned(zkey, groups)?;
             Ok(Prepared { device, resident })
         };
         let p = if resident::enabled() {

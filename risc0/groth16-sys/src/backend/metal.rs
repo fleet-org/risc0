@@ -48,7 +48,7 @@ impl Groth16Backend for Metal {
             let groups = CoefficientGroups::from_zkey(&zkey);
             zkey.coefficients = Vec::new();
             let device = MetalProver::new()?;
-            let resident = device.prepare(&zkey, &groups);
+            let resident = device.prepare_owned(zkey, groups);
             Ok(Prepared { device, resident })
         };
         let p = if resident::enabled() {

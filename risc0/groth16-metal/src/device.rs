@@ -309,6 +309,57 @@ impl<B: Backend> Prover<B> {
         }
     }
 
+    /// [`Self::prepare`] for a zkey the caller owns: every point set and the
+    /// coefficient groups are packed, uploaded and DROPPED one after another,
+    /// so the parsed and the packed copies never coexist in host memory.
+    pub fn prepare_owned(&self, mut zkey: Zkey, mut groups: CoefficientGroups) -> ResidentZkey<B> {
+        let n = zkey.domain_size;
+        let t = Tables::new(n);
+        let meta = strip(&zkey);
+        let counts = [
+            zkey.a.len(),
+            zkey.b1.len(),
+            zkey.c.len(),
+            zkey.h.len(),
+            zkey.b2.len(),
+        ];
+        let a_constraint = std::mem::take(&mut groups.a_constraint);
+        let b_constraint = std::mem::take(&mut groups.b_constraint);
+        let ca = self.upload(&pack::pack_coeffs(&std::mem::take(&mut groups.a)));
+        let sa = self.upload(&u32s(&std::mem::take(&mut groups.a_starts)));
+        let cb = self.upload(&pack::pack_coeffs(&std::mem::take(&mut groups.b)));
+        let sb = self.upload(&u32s(&std::mem::take(&mut groups.b_starts)));
+        drop(groups);
+        let pa = self.upload(&pack::pack_g1(&std::mem::take(&mut zkey.a)));
+        let pb1 = self.upload(&pack::pack_g1(&std::mem::take(&mut zkey.b1)));
+        let pc = self.upload(&pack::pack_g1(&std::mem::take(&mut zkey.c)));
+        let ph = self.upload(&pack::pack_g1(&std::mem::take(&mut zkey.h)));
+        let pb2 = self.upload(&pack::pack_g2(&std::mem::take(&mut zkey.b2)));
+        drop(zkey);
+        ResidentZkey {
+            meta,
+            a_constraint,
+            b_constraint,
+            ca,
+            sa,
+            cb,
+            sb,
+            n_inv: pack::fr_bytes(&t.n_inv),
+            lg_n: t.lg_n,
+            tb: TransformBuffers {
+                forward: self.upload(&pack::pack_fr(&t.forward)),
+                inverse: self.upload(&pack::pack_fr(&t.inverse)),
+                shift: self.upload(&pack::pack_fr(&t.shift_powers)),
+            },
+            pa,
+            pb1,
+            pc,
+            ph,
+            pb2,
+            counts,
+        }
+    }
+
     /// Bytes a resident zkey holds on the device.
     pub fn resident_bytes(&self, z: &ResidentZkey<B>) -> usize {
         [

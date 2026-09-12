@@ -199,6 +199,13 @@ impl Registry {
     }
 
     /// The kinds this registry contains, in registration order.
+    /// This registry without `kind` — the substitution check's shape: a build
+    /// that lacks the rewrite must refuse to select it, whatever else it has.
+    pub fn without(mut self, kind: BackendKind) -> Self {
+        self.backends.retain(|b| b.kind() != kind);
+        self
+    }
+
     pub fn available(&self) -> Vec<BackendKind> {
         self.backends.iter().map(|b| b.kind()).collect()
     }
@@ -420,6 +427,17 @@ mod tests {
             assert_eq!(BackendKind::parse(kind.name()).unwrap(), kind);
             assert_eq!(kind.to_string(), kind.name());
         }
+    }
+
+    #[test]
+    fn without_removes_exactly_that_kind() {
+        let (canonical, _) = mock(BackendKind::Canonical, false);
+        let (metal, _) = mock(BackendKind::Metal, false);
+        let registry = Registry::new().with(canonical).with(metal);
+        let without = registry.without(BackendKind::Metal);
+        assert_eq!(without.available(), vec![BackendKind::Canonical]);
+        assert!(without.select(Some("metal")).is_err());
+        assert!(without.select(Some("canonical")).is_ok());
     }
 
     #[test]

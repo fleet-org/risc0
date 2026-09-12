@@ -168,3 +168,41 @@ tenant's peak either side fails — and the tenant may be production.
 properties for `cuda-oxide` on the device (verifies; an unsatisfied witness is rejected by the
 verifier; a non-field witness value is rejected before proving), and `--features metal-cpu` the same
 for the Metal shaders on the CPU — one shared fixture helper, every kind.
+
+### Device etiquette on a shared GPU
+
+Before a production-sized run, `groth16_s01/scripts/gpu-free.py 5 2` samples the driver's free
+memory five times two seconds apart and exits non-zero when the minimum is below 10 GiB (or a
+`GPU_FREE_MIN_GIB` of your choosing); a swing above 1 GiB between samples means another tenant is
+allocating. On this box, minutes after the passing run, three samples read 2.5–3.2 GiB free: the
+other tenant held ≈ 13 GB. A run started then would have failed, and might have failed the tenant.
+`RISC0_GROTH16_TIMING=1` makes the CUDA prover print per-phase wall-clock (uploads, scatter, the
+three coset transforms, each MSM's host sort / bucket sums / reduction, assembly) to stderr, so a
+granted window yields a profile and not only a total.
+
+### The production circuit through the Metal shaders on the CPU (`metal-cpu`), control = `reference` — MEASURED 2026-09-12
+
+The Metal arm has no device in this session; its shaders, compiled as C++ (C14), prove the
+production circuit on the CPU through the same boundary and the same harness:
+
+| case                | rewrite   | rewrite verifies (1) | bit-flip | cross-claim | canonical answers   | malformed input | derive s | prove s |
+| ------------------- | --------- | -------------------- | -------- | ----------- | ------------------- | --------------- | -------: | ------: |
+| synthetic-loop-100k | metal-cpu | **yes**              | killed   | killed      | not run (see below) | killed          |     26.2 |   424.5 |
+
+Full row in
+[`reports/synthetic-loop-100k.metal-cpu.md`](./reports/synthetic-loop-100k.metal-cpu.md). 424.5 s is
+the shader source run one thread index at a time on one core; it is a correctness run, not a timing.
+What a Mac adds is the Metal compiler and the device: the arithmetic, the layouts and the whole
+pipeline down to a verifying production proof are established here.
+
+The `canonical answers` arm reports _not run_ because this harness binary was built with the
+canonical CUDA kernels compiled in (`--features cuda-canonical`) and the arm then insists on
+`canonical` as the control rather than the `reference` given — an arm-selection rule to revisit when
+the canonical control runs on the GPU. The two earlier runs (control `reference`, canonical not
+compiled in) killed it.
+
+The first attempt was killed by the host's low-memory watchdog at a 20.4 GB peak: the parsed zkey
+was alive while its packed copies were made, and the resident set stayed while the control proved.
+`prepare_owned` (both arms) now consumes the zkey field by field, and `RISC0_GROTH16_RESIDENT=0`
+drops the resident set after a one-off proof; the rerun peaked at 12.8 GB (5-second samples beside
+the run) on a 30 GB host shared with a production tenant.

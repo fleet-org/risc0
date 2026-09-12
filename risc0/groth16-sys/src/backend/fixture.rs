@@ -61,7 +61,10 @@ pub fn prove_through_boundary(kind: &str, witness_bytes: &[u8]) -> anyhow::Resul
     Verifier::from_json(proof, public, vk)?.verify()
 }
 
-/// The three properties, for `kind`.
+/// The three properties, for `kind` (used by the device kinds' tests; the
+/// reference backend keeps its three separate tests, so under a
+/// reference-only feature set this is unused).
+#[allow(dead_code)]
 pub fn three_properties(kind: &str) {
     prove_through_boundary(kind, &witness_bytes()).expect("the proof must verify");
     let mut bytes = witness_bytes();

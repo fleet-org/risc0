@@ -130,23 +130,9 @@ pub fn canonical_answers(
                 .join(", ")
         ));
     }
-    // The substitution check: a registry without the rewrite must refuse it.
-    let mut without = risc0_groth16_sys::Registry::new();
-    for kind in &available {
-        if *kind != rewrite {
-            without = match *kind {
-                BackendKind::Reference => without.with(Box::new(reference_backend())),
-                BackendKind::OxideCpu => {
-                    without.with(Box::new(risc0_groth16_sys::backend::oxide_cpu::OxideCpu))
-                }
-                other => {
-                    return Arm::NotRun(format!(
-                        "cannot rebuild a registry with `{other}` in this harness"
-                    ))
-                }
-            };
-        }
-    }
+    // The substitution check: a registry without the rewrite must refuse it —
+    // the compiled-in registry minus the rewrite, whatever kinds this build has.
+    let without = risc0_groth16_sys::backend::compiled_in().without(rewrite);
     if without.select(Some(rewrite.name())).is_ok() {
         return Arm::Survived(format!("a registry without `{rewrite}` still selected it"));
     }
@@ -172,10 +158,6 @@ pub fn canonical_answers(
             }
         }
     }
-}
-
-fn reference_backend() -> risc0_groth16_sys::backend::reference::Reference {
-    risc0_groth16_sys::backend::reference::Reference
 }
 
 /// Arm: a truncated stage input. Rejection happens before the boundary, in
