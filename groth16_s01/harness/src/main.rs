@@ -46,8 +46,34 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some("run") => run_cmd(&args[1..]),
-        _ => bail!("usage: synth <case-dir> [iterations] | run <case-dir> <artifacts-dir> <rewrite-kind> [--control <kind>] [--other <case-dir>] [--report <path>]"),
+        Some("rehearse") => rehearse_cmd(&args[1..]),
+        _ => bail!("usage: synth <case-dir> [iterations] | rehearse <case-dir> <artifacts-dir> <kind> | run <case-dir> <artifacts-dir> <rewrite-kind> [--control <kind>] [--other <case-dir>] [--report <path>]"),
     }
+}
+
+/// Produce a stage output with `<kind>` and store it as the case's REHEARSAL canonical,
+/// so assertions 2 and 3 can be exercised before the corpus exists.
+fn rehearse_cmd(args: &[String]) -> Result<()> {
+    let case_dir = PathBuf::from(args.first().context("rehearse <case-dir> …")?);
+    let artifacts = PathBuf::from(args.get(1).context("… <artifacts-dir> …")?);
+    let kind =
+        BackendKind::parse(args.get(2).context("… <kind>")?).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let case = Case::load(&case_dir)?;
+    let derived = derive::derive(&case.input, &artifacts)?;
+    let work = tempfile::tempdir()?;
+    let res = run::run(kind, &derived.witness, &artifacts, work.path())?;
+    let receipt = risc0_zkvm::Receipt::new(
+        risc0_zkvm::InnerReceipt::Groth16(oracle::receipt(&res.seal, &derived.ident.claim)),
+        case.input.journal.bytes.clone(),
+    );
+    Case::save_rehearsal(&case_dir, kind.name(), &receipt)?;
+    println!(
+        "rehearsal canonical written: rehearsal.{}.bincode (kind confirmed {}, {:.1} s)",
+        kind.name(),
+        res.kind,
+        res.seconds
+    );
+    Ok(())
 }
 
 fn run_cmd(args: &[String]) -> Result<()> {
@@ -180,6 +206,7 @@ fn run_case(
         case_id: case.id.clone(),
         rewrite_kind: res.kind.to_string(),
         canonical_verified,
+        canonical_provenance: case.canonical_provenance.clone(),
         rewrite_verified,
         public_inputs_equal,
         arms,

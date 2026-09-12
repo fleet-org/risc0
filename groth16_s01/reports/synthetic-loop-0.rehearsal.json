@@ -1,0 +1,25 @@
+{
+  "case_id": "synthetic-loop-0",
+  "rewrite_kind": "oxide-cpu",
+  "canonical_verified": "Yes",
+  "canonical_provenance": "rehearsal:reference",
+  "rewrite_verified": "Yes",
+  "public_inputs_equal": "Yes",
+  "arms": {
+    "bit_flip": {
+      "Killed": "one bit flipped in each of pi_a, pi_b, pi_c: all rejected"
+    },
+    "cross_claim": {
+      "Killed": "rejected against no second case; used the own digest with bit 0 flipped: verification indicates proof is invalid"
+    },
+    "canonical_answers": {
+      "Killed": "control `reference` answered and verified; registry reported `reference`; a registry without `oxide-cpu` refuses it"
+    },
+    "malformed_input": {
+      "Killed": "rejected before the boundary (bincode): io error: unexpected end of file"
+    }
+  },
+  "derive_seconds": 26.377658881000002,
+  "prove_seconds": 29.571513345,
+  "oracle": "risc0-groth16 3.0.3 (workspace at the milestone base tag v3.0.4) `Verifier` via risc0-zkvm 3.0.4 `Groth16Receipt::verify_integrity_with_context`"
+}
