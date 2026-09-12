@@ -20,7 +20,8 @@ refs:
 | C4 | `risc0-groth16-core` (shared `no_std` arithmetic, NTT, MSM, zkey/wtns, prover) + `reference` backend | verified by arkworks and the in-tree fixture |
 | C5 | s01/5 harness, run on the real `stark_verify` circuit with the reference arm | `groth16_s01/harness`, `HARNESS.md`, `reports/` |
 | C6 | CUDA arm kernel bodies (`risc0-groth16-oxide`, proven on the CPU launcher on the real circuit as `oxide-cpu`), Metal arm (`risc0-groth16-metal`, darwin type-checked), production artifact readers | same PR; comments on #5, #6 |
-| C7 | harness rehearsal mode (assertions 2/3 exercised and shown to fail), Metal per-kernel check binary, the commit gate `groth16_s01/scripts/precommit.sh` | PR #14, this PR |
+| C7 | harness rehearsal mode (assertions 2/3 exercised and shown to fail), Metal per-kernel check binary, the commit gate `groth16_s01/scripts/precommit.sh` | PRs #14, #15 |
+| C8 | CUDA arm host side (`risc0-groth16-cuda`, `cuda-oxide` backend), the shared ABI and the coset launch schedule as data (which also fixed a ping-pong bug in the never-run Metal transform), the device-module template, GPU-less type-checks in CI | PR #16 |
 
 Every claim in those documents is marked MEASURED / INFERRED / UNVERIFIED; every source link is a full-SHA permalink.
 
@@ -29,7 +30,7 @@ Every claim in those documents is marked MEASURED / INFERRED / UNVERIFIED; every
 | item | blocked on | what unblocks it |
 |---|---|---|
 | s01/3 corpus (assertions 2 and 3 on production data) | production access (E1) | run `CORPUS.md` §2 where the agent's `DATABASE_URL`/`S3_*` are set; freeze as a GitHub Release on this fork |
-| s01/4 device launcher for the CUDA arm | a CUDA 13 host with the nightly + `cargo oxide` (E2) | prove the two-phase artifact shape and cudart/driver-API coexistence first (`CUDA_OXIDE_PIN.md` verdict); then `#[cuda_module]` wrappers over `risc0-groth16-oxide::kernels`; then `harness run … cuda-oxide --control canonical` |
+| s01/4 device half of the CUDA arm | a CUDA 13 host with the nightly + `cargo oxide` (E2) | `groth16_s01/cuda-kernels/README.md` in order: build the device module, run `groth16-cuda-kernel-check` (names the first kernel that differs from the Rust bodies), `cargo test -p risc0-groth16-sys --features cuda-oxide`, then `harness run … cuda-oxide --control canonical`; the host side, ABI and schedule are in place and type-checked |
 | s01/4b Metal execution | a macOS 13+ Apple Silicon host (E3) | `cargo run -p risc0-groth16-metal --bin groth16-metal-kernel-check`, then `harness run … metal --control reference` |
 | s01/6 on-chain e2e + timing | the deployment (and fleet-org/fleet#1950 or production authorization) | out of any CRCS's reach; needs root-CP |
 
@@ -40,6 +41,7 @@ Every claim in those documents is marked MEASURED / INFERRED / UNVERIFIED; every
 - **Encodings:** zkey points Montgomery LE; coefficient values `v·R²`; witness canonical. A port that gets any of the three wrong produces a proof that fails to verify with no other symptom.
 - **CRCS toolchain:** no C compiler, no `protoc`, no libclang, no xz in the container; the relocations that worked are recorded in the catalog draft `groth16-s01-fork-baseline` (I-ASM-006..008); the session's `buildenv.sh` in its home directory is the sourced form. The memory guard counts page cache: keep `evict-cache.py` running beside big reads or builds.
 - **Every commit passes `groth16_s01/scripts/precommit.sh`** (privacy, links, format, license, clippy, message shape); install it once with `--install`. CI runs the same script on the PR range.
+- **Orchestration written blind must be data with one executor that is tested.** The Metal coset transform chose its own ping-pong buffers and read the pre-scale buffer into the forward NTT; nothing could catch it without a Mac. The launch order is now `risc0_groth16_oxide::schedule`, run by the CPU pipeline under the byte-identical-proof test, so the Metal and CUDA provers only follow it.
 - **A claim does not encode work**: two runs of the same guest with the same journal are the same statement; the cross-claim arm needs a different image id or journal, or its labeled derived-claim fallback.
 - **The `canonical answers` arm needs a control that differs from the rewrite and is compiled in**; on a CUDA host use `--control canonical`, elsewhere `--control reference`.
 

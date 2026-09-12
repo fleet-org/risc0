@@ -52,26 +52,6 @@ fn scatter<L: Launcher>(
     poly
 }
 
-/// Bit-reverse then run the log2(n) stages, ping-ponging between `a` and `b`.
-/// Returns which buffer holds the result.
-fn ntt<L: Launcher>(l: &L, a: &mut [Fr], b: &mut [Fr], twiddles: &[Fr], lg_n: u32) -> bool {
-    let n = a.len();
-    l.map(b, |i| kernels::bit_reverse(i, a, lg_n));
-    let mut in_b = true;
-    let mut len = 2;
-    while len <= n {
-        let stride = n / len;
-        if in_b {
-            l.map(a, |i| kernels::ntt_stage(i, b, len, twiddles, stride));
-        } else {
-            l.map(b, |i| kernels::ntt_stage(i, a, len, twiddles, stride));
-        }
-        in_b = !in_b;
-        len <<= 1;
-    }
-    in_b
-}
-
 /// Evaluations on `H` → evaluations on the coset `shift·H` (inverse NTT,
 /// scale by `1/n`, coset scale, forward NTT), through the kernels.
 pub fn h_to_coset<L: Launcher>(l: &L, evals: Vec<Fr>, t: &Tables) -> Vec<Fr> {
@@ -79,27 +59,52 @@ pub fn h_to_coset<L: Launcher>(l: &L, evals: Vec<Fr>, t: &Tables) -> Vec<Fr> {
     h_to_coset_with(l, evals, &mut scratch, t)
 }
 
-/// [`h_to_coset`] with a caller-provided scratch buffer of the same length
-/// (reused across the three polynomials, so only one extra buffer is live).
+/// [`h_to_coset`] with a caller-owned scratch buffer of the same length (so a
+/// long run keeps one scratch allocation): executes [`schedule::coset`] over
+/// the two buffers and returns the one the schedule names as the result,
+/// leaving the other in `scratch`.
 pub fn h_to_coset_with<L: Launcher>(
     l: &L,
     evals: Vec<Fr>,
     scratch: &mut Vec<Fr>,
     t: &Tables,
 ) -> Vec<Fr> {
+    use crate::schedule::{Buf, Step, Twiddles};
     let n = evals.len();
     let mut a = evals;
     let mut b = std::mem::take(scratch);
     assert_eq!(b.len(), n, "scratch must match the domain");
-    let in_b = ntt(l, &mut a, &mut b, &t.inverse, t.lg_n);
-    let (src, dst) = if in_b { (&b, &mut a) } else { (&a, &mut b) };
-    // 1/n and the shift powers in one pass: coeff_i · n⁻¹ · shift^i
-    l.map(dst, |i| {
-        kernels::pointwise_scale(i, src, &t.shift_powers).mul(&t.n_inv)
-    });
-    let (mut a, mut b) = if in_b { (a, b) } else { (b, a) };
-    let in_b = ntt(l, &mut a, &mut b, &t.forward, t.lg_n);
-    let (result, leftover) = if in_b { (b, a) } else { (a, b) };
+    let sched = crate::schedule::coset(n as u32);
+    for step in &sched.steps {
+        let (src, dst) = match step.src() {
+            Buf::A => (&a, &mut b),
+            Buf::B => (&b, &mut a),
+        };
+        match *step {
+            Step::BitReverse { .. } => l.map(dst, |i| kernels::bit_reverse(i, src, t.lg_n)),
+            Step::NttStage {
+                len,
+                stride,
+                twiddles,
+                ..
+            } => {
+                let tw = match twiddles {
+                    Twiddles::Inverse => &t.inverse,
+                    Twiddles::Forward => &t.forward,
+                };
+                l.map(dst, |i| {
+                    kernels::ntt_stage(i, src, len as usize, tw, stride as usize)
+                })
+            }
+            Step::Scale { .. } => l.map(dst, |i| {
+                kernels::pointwise_scale(i, src, &t.shift_powers).mul(&t.n_inv)
+            }),
+        }
+    }
+    let (result, leftover) = match sched.result {
+        Buf::A => (a, b),
+        Buf::B => (b, a),
+    };
     *scratch = leftover;
     result
 }

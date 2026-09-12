@@ -2363,6 +2363,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuda-bindings"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f42e2c99c56bf2eef9d569435bfd72a478dfaea3f178b8e5bae891875bbbe2e"
+dependencies = [
+ "bindgen 0.69.5",
+ "libloading",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
+name = "cuda-core"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84bdb592a2844148fb13bdfbbab158879f56916bde1d1a1b6580ca27f23850cd"
+dependencies = [
+ "anyhow",
+ "cuda-bindings",
+ "cuda-core-derive",
+ "half",
+ "oxide-artifacts",
+]
+
+[[package]]
+name = "cuda-core-derive"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a48da7d10c1078f7fbb87d7176e9476affadea148babf31946e348073872d44"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
 name = "cust"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5737,7 +5775,10 @@ version = "0.36.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
 dependencies = [
+ "crc32fast",
  "flate2",
+ "hashbrown 0.15.5",
+ "indexmap 2.11.0",
  "memchr",
  "ruzstd",
 ]
@@ -5928,6 +5969,15 @@ name = "overload"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
+
+[[package]]
+name = "oxide-artifacts"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74d9a941c0c43d2dceaf25f5c9ca4c9f9cceb28dfa5e4e3cfd14e476f003e7c9"
+dependencies = [
+ "object",
+]
 
 [[package]]
 name = "papergrid"
@@ -7225,6 +7275,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "risc0-groth16-cuda"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cuda-core",
+ "risc0-groth16-core",
+ "risc0-groth16-oxide",
+]
+
+[[package]]
 name = "risc0-groth16-metal"
 version = "0.1.0"
 dependencies = [
@@ -7233,6 +7293,7 @@ dependencies = [
  "ark-ff 0.5.0",
  "metal",
  "risc0-groth16-core",
+ "risc0-groth16-oxide",
 ]
 
 [[package]]
@@ -7256,6 +7317,7 @@ dependencies = [
  "risc0-build-kernel",
  "risc0-groth16",
  "risc0-groth16-core",
+ "risc0-groth16-cuda",
  "risc0-groth16-oxide",
  "serde_json",
  "sppark",

@@ -8,6 +8,7 @@ on:
     branches: [integration/staging-platform]
     paths:
       - 'risc0/groth16-core/**'
+      - 'risc0/groth16-cuda/**'
       - 'risc0/groth16-metal/**'
       - 'risc0/groth16-oxide/**'
       - 'risc0/groth16-sys/**'
@@ -19,6 +20,7 @@ on:
     branches: [integration/staging-platform]
     paths:
       - 'risc0/groth16-core/**'
+      - 'risc0/groth16-cuda/**'
       - 'risc0/groth16-metal/**'
       - 'risc0/groth16-oxide/**'
       - 'risc0/groth16-sys/**'
@@ -46,6 +48,8 @@ jobs:
           rustup component add rustfmt clippy
       - name: cargo-sort
         run: cargo install cargo-sort --version '^1.0' --locked
+      - name: CUDA 13 headers (clippy on the CUDA arm's host crate needs cuda-bindings to build)
+        run: groth16_s01/scripts/cuda-headers.sh "$RUNNER_TEMP/cuda" >> "$GITHUB_ENV"
       - name: precommit.sh on the range
         env:
           GH_TOKEN: ${{ github.token }}

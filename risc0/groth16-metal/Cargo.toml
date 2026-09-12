@@ -15,6 +15,8 @@ path = "src/bin/kernel-check.rs"
 [dependencies]
 anyhow = "1.0"
 risc0-groth16-core = { path = "../groth16-core" }
+# the launch schedule of the coset transform (shared with the CUDA arm and the CPU pipeline)
+risc0-groth16-oxide = { path = "../groth16-oxide" }
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 metal = { workspace = true }
