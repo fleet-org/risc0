@@ -11,3 +11,5 @@ Base branch `integration/staging-platform` = upstream tag `v3.0.4` (`d7ee368e`),
 | [`CORPUS.md`](./CORPUS.md) | s01/3 · #4 | capture recipe, coverage axes, manifest schema, freeze rules |
 
 Code lands under `risc0/groth16-sys/` (boundary trait + backends) and, later, `groth16_s01/harness/` (s01/5). Every issue reference is repo-qualified; every source link is a full-SHA permalink.
+
+**Status:** C3 — the boundary module `risc0/groth16-sys/src/backend.rs` (`Groth16Backend`, `BackendKind`, `Registry`, `RISC0_GROTH16_BACKEND`) with the canonical backend registered under `cuda`; CI in `.github/workflows/groth16-s01.yml`.

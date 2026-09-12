@@ -19,6 +19,10 @@ use std::{
 
 use anyhow::{anyhow, Result};
 
+pub mod backend;
+
+pub use backend::{BackendKind, Groth16Backend, Registry, SelectError, BACKEND_ENV};
+
 #[cfg(feature = "cuda")]
 pub use sppark::Error as SpparkError;
 
@@ -66,8 +70,21 @@ impl ProverParams {
     }
 }
 
-#[cfg(feature = "cuda")]
+/// Prove through the backend selected by [`BACKEND_ENV`] (default: `canonical`).
+///
+/// This is the substitution point of GROTH16 s01 (`groth16_s01/BOUNDARY.md`):
+/// callers do not know which implementation answers, and an unknown or
+/// unavailable selection is an error rather than a fallback.
 pub fn prove(prover_params: &ProverParams, setup_params: &SetupParams) -> anyhow::Result<()> {
+    backend::compiled_in().prove_from_env(prover_params, setup_params)
+}
+
+/// The upstream CUDA C++ prover: the `canonical` backend's implementation.
+#[cfg(feature = "cuda")]
+pub(crate) fn ffi_prove(
+    prover_params: &ProverParams,
+    setup_params: &SetupParams,
+) -> anyhow::Result<()> {
     let setup_params = RawSetupParams {
         pcoeffs_path: setup_params.pcoeffs_path.c_str.as_ptr(),
         fres_path: setup_params.fres_path.c_str.as_ptr(),

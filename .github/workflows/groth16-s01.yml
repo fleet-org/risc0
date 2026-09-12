@@ -1,0 +1,48 @@
+# GROTH16 s01 — milestone CI for the fleet-org/risc0 fork (fleet-org/risc0 milestone 1).
+#
+# Gates the boundary crate on every change to it, on the branch the milestone
+# integrates into. Arms add their own jobs here as they land: the CUDA arm needs
+# a CUDA-capable runner, the Metal arm a macOS runner — neither exists on
+# ubuntu-latest, which is why this job type-checks those paths without building
+# kernels (RISC0_SKIP_BUILD_KERNELS) or an SDK (cargo check for the darwin target).
+name: groth16-s01
+
+on:
+  push:
+    branches: [integration/staging-platform]
+    paths:
+      - 'risc0/groth16-sys/**'
+      - 'risc0/groth16/**'
+      - 'groth16_s01/**'
+      - '.github/workflows/groth16-s01.yml'
+  pull_request:
+    branches: [integration/staging-platform]
+    paths:
+      - 'risc0/groth16-sys/**'
+      - 'risc0/groth16/**'
+      - 'groth16_s01/**'
+      - '.github/workflows/groth16-s01.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  boundary:
+    name: risc0-groth16-sys boundary (host)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned by rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-apple-darwin
+      - name: Unit tests — selection and dispatch properties (default features)
+        run: cargo test -p risc0-groth16-sys --locked
+      - name: Type-check the canonical CUDA path without nvcc
+        env:
+          RISC0_SKIP_BUILD_KERNELS: "1"
+        run: cargo check -p risc0-groth16-sys --features cuda --locked
+      - name: Type-check for aarch64-apple-darwin (Metal arm target; no SDK needed for check)
+        run: cargo check -p risc0-groth16-sys --target aarch64-apple-darwin --locked
