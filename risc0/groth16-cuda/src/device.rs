@@ -25,7 +25,7 @@ use cuda_core::simt::{
 use risc0_groth16_core::{
     coeff::GroupedCoeff,
     ec::{Affine, Jacobian},
-    field::{Field, Fr},
+    field::{Field, Fp, Fr},
     fp2::Fp2,
     prover::{
         assemble, counting_sort_by_digit, horner, reduce_buckets, CoefficientGroups, Msms, Proof,
@@ -81,11 +81,18 @@ fn slice<T>(b: &Buffer<T>) -> [Arg; 2] {
     [Arg::Ptr(ptr(b)), Arg::U32(b.len() as u32)]
 }
 
-/// The twiddle tables and coset shift powers, uploaded once per proof.
+/// The twiddle tables and coset shift powers on the device.
 struct TransformBuffers {
     forward: Buffer<Fr>,
     inverse: Buffer<Fr>,
     shift: Buffer<Fr>,
+}
+
+/// What the coset transform needs besides its two buffers.
+struct CosetTables<'a> {
+    n_inv: Fr,
+    lg_n: u32,
+    tb: &'a TransformBuffers,
 }
 
 /// One GPU, one stream, the loaded device module, every kernel resolved.
@@ -208,9 +215,9 @@ impl CudaProver {
         a: &'b Buffer<Fr>,
         b: &'b Buffer<Fr>,
         n: usize,
-        t: &Tables,
-        tb: &TransformBuffers,
+        coset: &CosetTables<'_>,
     ) -> Result<&'b Buffer<Fr>> {
+        let (tb, n_inv, lg_n) = (coset.tb, coset.n_inv, coset.lg_n);
         let pick = |which: Buf| match which {
             Buf::A => a,
             Buf::B => b,
@@ -223,7 +230,7 @@ impl CudaProver {
                     abi::BIT_REVERSE,
                     ptr(dst),
                     n,
-                    &[&slice(src)[..], &[Arg::U32(t.lg_n)]].concat(),
+                    &[&slice(src)[..], &[Arg::U32(lg_n)]].concat(),
                 )?,
                 Step::NttStage {
                     len,
@@ -252,7 +259,7 @@ impl CudaProver {
                     abi::POINTWISE_SCALE,
                     ptr(dst),
                     n,
-                    &[&slice(src)[..], &slice(&tb.shift), &[Arg::Fr(t.n_inv)]].concat(),
+                    &[&slice(src)[..], &slice(&tb.shift), &[Arg::Fr(n_inv)]].concat(),
                 )?,
             }
         }
@@ -310,7 +317,8 @@ impl CudaProver {
         self.prove_grouped(zkey, &groups, witness, r, s)
     }
 
-    /// [`Self::prove`] with the coefficient groups already built.
+    /// [`Self::prove`] with the coefficient groups already built: upload the
+    /// zkey for this one proof and drop it after.
     pub fn prove_grouped(
         &self,
         zkey: &Zkey,
@@ -319,6 +327,54 @@ impl CudaProver {
         r: &Fr,
         s: &Fr,
     ) -> Result<Proof> {
+        let resident = self.prepare(zkey, groups)?;
+        self.prove_resident(&resident, witness, r, s)
+    }
+
+    /// Upload everything of a zkey that every proof reads — the five point
+    /// sets, the grouped coefficients and their group starts, the NTT tables
+    /// — once, and keep it on the device (DEF-G16-014). The canonical path
+    /// re-maps and re-uploads the 3.45 GiB zkey on every call; a resident
+    /// zkey costs one upload per process (≈ 4.6 GB on the production circuit,
+    /// [`ResidentZkey::device_bytes`]) and per-proof traffic drops to the
+    /// witness in and the proof out.
+    pub fn prepare(&self, zkey: &Zkey, groups: &CoefficientGroups) -> Result<ResidentZkey> {
+        let n = zkey.domain_size;
+        let t = Tables::new(n);
+        let tb = TransformBuffers {
+            forward: self.upload(&t.forward)?,
+            inverse: self.upload(&t.inverse)?,
+            shift: self.upload(&t.shift_powers)?,
+        };
+        Ok(ResidentZkey {
+            meta: strip(zkey),
+            a_constraint: groups.a_constraint.clone(),
+            b_constraint: groups.b_constraint.clone(),
+            ca: self.upload(&groups.a)?,
+            sa: self.upload(&groups.a_starts)?,
+            cb: self.upload(&groups.b)?,
+            sb: self.upload(&groups.b_starts)?,
+            n_inv: t.n_inv,
+            lg_n: t.lg_n,
+            tb,
+            pa: self.upload(&zkey.a)?,
+            pb1: self.upload(&zkey.b1)?,
+            pc: self.upload(&zkey.c)?,
+            ph: self.upload(&zkey.h)?,
+            pb2: self.upload(&zkey.b2)?,
+        })
+    }
+
+    /// Produce a proof against a resident zkey: the witness goes up, the
+    /// proof comes back; nothing of the zkey moves.
+    pub fn prove_resident(
+        &self,
+        z: &ResidentZkey,
+        witness: &[Fr],
+        r: &Fr,
+        s: &Fr,
+    ) -> Result<Proof> {
+        let zkey = &z.meta;
         if witness.len() != zkey.num_vars {
             return Err(ProveError::WitnessLength {
                 expected: zkey.num_vars,
@@ -330,34 +386,27 @@ impl CudaProver {
             return Err(ProveError::WitnessConstant.into());
         }
         let n = zkey.domain_size;
-        let t = Tables::new(n);
         let witness_b = self.upload(witness)?;
-        let tb = TransformBuffers {
-            forward: self.upload(&t.forward)?,
-            inverse: self.upload(&t.inverse)?,
-            shift: self.upload(&t.shift_powers)?,
-        };
         // scatter A and B (group sums on the device), placed at their constraint
         // indices on the host
-        let scatter = |coeffs: &[GroupedCoeff], starts: &[u32], cons: &[u32]| -> Result<Vec<Fr>> {
-            let cb = self.upload(coeffs)?;
-            let sb = self.upload(starts)?;
-            let out: Buffer<Fr> = self.alloc(cons.len())?;
-            self.run(
-                abi::SCATTER_GROUP,
-                ptr(&out),
-                cons.len(),
-                &[&slice(&cb)[..], &slice(&sb), &slice(&witness_b)].concat(),
-            )?;
-            let sums = self.read(&out)?;
-            let mut poly = vec![Fr::ZERO; n];
-            for (c, v) in cons.iter().zip(sums) {
-                poly[*c as usize] = v;
-            }
-            Ok(poly)
-        };
-        let a_poly = scatter(&groups.a, &groups.a_starts, &groups.a_constraint)?;
-        let b_poly = scatter(&groups.b, &groups.b_starts, &groups.b_constraint)?;
+        let scatter =
+            |cb: &Buffer<GroupedCoeff>, sb: &Buffer<u32>, cons: &[u32]| -> Result<Vec<Fr>> {
+                let out: Buffer<Fr> = self.alloc(cons.len())?;
+                self.run(
+                    abi::SCATTER_GROUP,
+                    ptr(&out),
+                    cons.len(),
+                    &[&slice(cb)[..], &slice(sb), &slice(&witness_b)].concat(),
+                )?;
+                let sums = self.read(&out)?;
+                let mut poly = vec![Fr::ZERO; n];
+                for (c, v) in cons.iter().zip(sums) {
+                    poly[*c as usize] = v;
+                }
+                Ok(poly)
+            };
+        let a_poly = scatter(&z.ca, &z.sa, &z.a_constraint)?;
+        let b_poly = scatter(&z.cb, &z.sb, &z.b_constraint)?;
         let (a1, a2) = (self.upload(&a_poly)?, self.alloc::<Fr>(n)?);
         let (b1, b2) = (self.upload(&b_poly)?, self.alloc::<Fr>(n)?);
         let (c1, c2) = (self.alloc::<Fr>(n)?, self.alloc::<Fr>(n)?);
@@ -367,9 +416,14 @@ impl CudaProver {
             n,
             &[&slice(&a1)[..], &slice(&b1)].concat(),
         )?;
-        let ac = self.h_to_coset(&a1, &a2, n, &t, &tb)?;
-        let bc = self.h_to_coset(&b1, &b2, n, &t, &tb)?;
-        let cc = self.h_to_coset(&c1, &c2, n, &t, &tb)?;
+        let coset = CosetTables {
+            n_inv: z.n_inv,
+            lg_n: z.lg_n,
+            tb: &z.tb,
+        };
+        let ac = self.h_to_coset(&a1, &a2, n, &coset)?;
+        let bc = self.h_to_coset(&b1, &b2, n, &coset)?;
+        let cc = self.h_to_coset(&c1, &c2, n, &coset)?;
         let q: Buffer<Fr> = self.alloc(n)?;
         self.run(
             abi::POINTWISE_MUL_SUB,
@@ -378,24 +432,85 @@ impl CudaProver {
             &[&slice(ac)[..], &slice(bc), &slice(cc)].concat(),
         )?;
         let quotient = self.read(&q)?;
-        // free the polynomial buffers (7 × n × 32 B) before the points go up
-        drop((a1, a2, b1, b2, c1, c2, q, tb));
-        let (pa, pb1, pc, ph) = (
-            self.upload(&zkey.a)?,
-            self.upload(&zkey.b1)?,
-            self.upload(&zkey.c)?,
-            self.upload(&zkey.h)?,
-        );
-        let pb2 = self.upload(&zkey.b2)?;
+        // free the per-proof polynomial buffers (7 × n × 32 B) before the MSMs
+        drop((a1, a2, b1, b2, c1, c2, q));
         let private = &witness[zkey.num_public + 1..];
         let msms = Msms {
-            h: self.msm(abi::BUCKET_SUM_G1, &ph, &quotient)?,
-            a: self.msm(abi::BUCKET_SUM_G1, &pa, witness)?,
-            b1: self.msm(abi::BUCKET_SUM_G1, &pb1, witness)?,
-            b2: self.msm::<Fp2>(abi::BUCKET_SUM_G2, &pb2, witness)?,
-            c: self.msm(abi::BUCKET_SUM_G1, &pc, private)?,
+            h: self.msm(abi::BUCKET_SUM_G1, &z.ph, &quotient)?,
+            a: self.msm(abi::BUCKET_SUM_G1, &z.pa, witness)?,
+            b1: self.msm(abi::BUCKET_SUM_G1, &z.pb1, witness)?,
+            b2: self.msm::<Fp2>(abi::BUCKET_SUM_G2, &z.pb2, witness)?,
+            c: self.msm(abi::BUCKET_SUM_G1, &z.pc, private)?,
         };
         Ok(assemble(zkey, &msms, r, s))
+    }
+}
+
+/// A zkey uploaded once and kept on the device across proofs: the five point
+/// sets, the grouped coefficients with their group starts, the NTT tables.
+/// The host keeps only what assembly and the scatter placement need.
+pub struct ResidentZkey {
+    /// Sizes and the verifying key; every point vector empty.
+    meta: Zkey,
+    a_constraint: Vec<u32>,
+    b_constraint: Vec<u32>,
+    ca: Buffer<GroupedCoeff>,
+    sa: Buffer<u32>,
+    cb: Buffer<GroupedCoeff>,
+    sb: Buffer<u32>,
+    n_inv: Fr,
+    lg_n: u32,
+    tb: TransformBuffers,
+    pa: Buffer<Affine<Fp>>,
+    pb1: Buffer<Affine<Fp>>,
+    pc: Buffer<Affine<Fp>>,
+    ph: Buffer<Affine<Fp>>,
+    pb2: Buffer<Affine<Fp2>>,
+}
+
+impl ResidentZkey {
+    /// Bytes held on the device.
+    pub fn device_bytes(&self) -> usize {
+        self.ca.num_bytes()
+            + self.sa.num_bytes()
+            + self.cb.num_bytes()
+            + self.sb.num_bytes()
+            + self.tb.forward.num_bytes()
+            + self.tb.inverse.num_bytes()
+            + self.tb.shift.num_bytes()
+            + self.pa.num_bytes()
+            + self.pb1.num_bytes()
+            + self.pc.num_bytes()
+            + self.ph.num_bytes()
+            + self.pb2.num_bytes()
+    }
+
+    /// The circuit's variable count.
+    pub fn num_vars(&self) -> usize {
+        self.meta.num_vars
+    }
+
+    /// The circuit's public input count.
+    pub fn num_public(&self) -> usize {
+        self.meta.num_public
+    }
+}
+
+/// The zkey without its point and coefficient vectors: what `assemble` and
+/// the size checks read.
+fn strip(zkey: &Zkey) -> Zkey {
+    Zkey {
+        num_vars: zkey.num_vars,
+        num_public: zkey.num_public,
+        domain_size: zkey.domain_size,
+        vk: zkey.vk.clone(),
+        ic: zkey.ic.clone(),
+        coefficients: Vec::new(),
+        a: Vec::new(),
+        b1: Vec::new(),
+        b2: Vec::new(),
+        c: Vec::new(),
+        h: Vec::new(),
     }
 }
 

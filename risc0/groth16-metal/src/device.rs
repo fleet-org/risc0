@@ -26,8 +26,8 @@ use metal::{
     MTLLanguageVersion, MTLResourceOptions, MTLSize,
 };
 use risc0_groth16_core::{
-    ec::{Affine, Jacobian},
-    field::{Field, Fp, Fr},
+    ec::Jacobian,
+    field::{Field, Fr},
     fp2::Fp2,
     prover::{
         assemble, counting_sort_by_digit, horner, reduce_buckets, CoefficientGroups, Msms, Proof,
@@ -59,6 +59,13 @@ pub struct MetalProver {
 }
 
 /// The transform tables uploaded once per proof.
+/// What the coset transform needs besides its two buffers.
+struct CosetTables<'a> {
+    n_inv: &'a [u8; 32],
+    lg_n: u32,
+    tb: &'a TransformBuffers,
+}
+
 struct TransformBuffers {
     forward: Buffer,
     inverse: Buffer,
@@ -159,16 +166,16 @@ impl MetalProver {
         a: &'b Buffer,
         b: &'b Buffer,
         n: usize,
-        t: &Tables,
-        tb: &TransformBuffers,
+        coset: &CosetTables<'_>,
     ) -> &'b Buffer {
+        let tb = coset.tb;
         use risc0_groth16_oxide::schedule::{Buf, Step, Twiddles};
         let pick = |which: Buf| match which {
             Buf::A => a,
             Buf::B => b,
         };
-        let lg = t.lg_n.to_le_bytes();
-        let n_inv = pack::fr_bytes(&t.n_inv);
+        let lg = coset.lg_n.to_le_bytes();
+        let n_inv = coset.n_inv;
         let sched = risc0_groth16_oxide::schedule::coset(n as u32);
         for step in &sched.steps {
             let (src, dst) = (pick(step.src()), pick(step.dst()));
@@ -206,7 +213,7 @@ impl MetalProver {
                     &[
                         Arg::Buf(src),
                         Arg::Buf(&tb.shift),
-                        Arg::Bytes(&n_inv),
+                        Arg::Bytes(n_inv),
                         Arg::Buf(dst),
                     ],
                 ),
@@ -280,8 +287,63 @@ impl MetalProver {
         horner(&window_sums, w)
     }
 
-    /// Produce a proof: the arm's implementation of the boundary.
+    /// Produce a proof: the arm's implementation of the boundary — upload the
+    /// zkey for this one proof and drop it after.
     pub fn prove(&self, zkey: &Zkey, witness: &[Fr], r: &Fr, s: &Fr) -> Result<Proof> {
+        let groups = CoefficientGroups::from_zkey(zkey);
+        let resident = self.prepare(zkey, &groups);
+        self.prove_resident(&resident, witness, r, s)
+    }
+
+    /// Upload everything of a zkey that every proof reads — the five point
+    /// sets, the grouped coefficients and their group starts, the NTT tables
+    /// — once, and keep it on the device (DEF-G16-014). With unified memory
+    /// the buffers are the zkey's only copy the GPU needs; per-proof traffic
+    /// drops to the witness in and the proof out.
+    pub fn prepare(&self, zkey: &Zkey, groups: &CoefficientGroups) -> ResidentZkey {
+        let n = zkey.domain_size;
+        let t = Tables::new(n);
+        let u32s = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<_>>();
+        ResidentZkey {
+            meta: strip(zkey),
+            a_constraint: groups.a_constraint.clone(),
+            b_constraint: groups.b_constraint.clone(),
+            ca: self.upload(&pack::pack_coeffs(&groups.a)),
+            sa: self.upload(&u32s(&groups.a_starts)),
+            cb: self.upload(&pack::pack_coeffs(&groups.b)),
+            sb: self.upload(&u32s(&groups.b_starts)),
+            n_inv: pack::fr_bytes(&t.n_inv),
+            lg_n: t.lg_n,
+            tb: TransformBuffers {
+                forward: self.upload(&pack::pack_fr(&t.forward)),
+                inverse: self.upload(&pack::pack_fr(&t.inverse)),
+                shift: self.upload(&pack::pack_fr(&t.shift_powers)),
+            },
+            pa: self.upload(&pack::pack_g1(&zkey.a)),
+            pb1: self.upload(&pack::pack_g1(&zkey.b1)),
+            pc: self.upload(&pack::pack_g1(&zkey.c)),
+            ph: self.upload(&pack::pack_g1(&zkey.h)),
+            pb2: self.upload(&pack::pack_g2(&zkey.b2)),
+            counts: [
+                zkey.a.len(),
+                zkey.b1.len(),
+                zkey.c.len(),
+                zkey.h.len(),
+                zkey.b2.len(),
+            ],
+        }
+    }
+
+    /// Produce a proof against a resident zkey: the witness goes up, the
+    /// proof comes back; nothing of the zkey moves.
+    pub fn prove_resident(
+        &self,
+        z: &ResidentZkey,
+        witness: &[Fr],
+        r: &Fr,
+        s: &Fr,
+    ) -> Result<Proof> {
+        let zkey = &z.meta;
         if witness.len() != zkey.num_vars {
             return Err(ProveError::WitnessLength {
                 expected: zkey.num_vars,
@@ -293,34 +355,16 @@ impl MetalProver {
             return Err(ProveError::WitnessConstant.into());
         }
         let n = zkey.domain_size;
-        let groups = CoefficientGroups::from_zkey(zkey);
-        let t = Tables::new(n);
         let witness_b = self.upload(&pack::pack_fr(witness));
-        let tb = TransformBuffers {
-            forward: self.upload(&pack::pack_fr(&t.forward)),
-            inverse: self.upload(&pack::pack_fr(&t.inverse)),
-            shift: self.upload(&pack::pack_fr(&t.shift_powers)),
-        };
-
         // scatter A and B (group sums), placed at their constraint indices on the host
-        let scatter = |coeffs: &[risc0_groth16_core::coeff::GroupedCoeff],
-                       starts: &[u32],
-                       cons: &[u32]|
-         -> Vec<u8> {
-            let cb = self.upload(&pack::pack_coeffs(coeffs));
-            let sb = self.upload(
-                &starts
-                    .iter()
-                    .flat_map(|x| x.to_le_bytes())
-                    .collect::<Vec<_>>(),
-            );
+        let scatter = |cb: &Buffer, sb: &Buffer, cons: &[u32]| -> Vec<u8> {
             let out = self.alloc(cons.len() * 32);
             self.run(
                 "scatter_group",
                 cons.len(),
                 &[
-                    Arg::Buf(&cb),
-                    Arg::Buf(&sb),
+                    Arg::Buf(cb),
+                    Arg::Buf(sb),
                     Arg::Buf(&witness_b),
                     Arg::Buf(&out),
                 ],
@@ -332,8 +376,8 @@ impl MetalProver {
             }
             pack::pack_fr(&poly)
         };
-        let a_bytes = scatter(&groups.a, &groups.a_starts, &groups.a_constraint);
-        let b_bytes = scatter(&groups.b, &groups.b_starts, &groups.b_constraint);
+        let a_bytes = scatter(&z.ca, &z.sa, &z.a_constraint);
+        let b_bytes = scatter(&z.cb, &z.sb, &z.b_constraint);
         let (a1, a2) = (self.upload(&a_bytes), self.alloc(n * 32));
         let (b1, b2) = (self.upload(&b_bytes), self.alloc(n * 32));
         let (c1, c2) = (self.alloc(n * 32), self.alloc(n * 32));
@@ -342,10 +386,14 @@ impl MetalProver {
             n,
             &[Arg::Buf(&a1), Arg::Buf(&b1), Arg::Buf(&c1)],
         );
-
-        let ac = self.h_to_coset(&a1, &a2, n, &t, &tb);
-        let bc = self.h_to_coset(&b1, &b2, n, &t, &tb);
-        let cc = self.h_to_coset(&c1, &c2, n, &t, &tb);
+        let coset = CosetTables {
+            n_inv: &z.n_inv,
+            lg_n: z.lg_n,
+            tb: &z.tb,
+        };
+        let ac = self.h_to_coset(&a1, &a2, n, &coset);
+        let bc = self.h_to_coset(&b1, &b2, n, &coset);
+        let cc = self.h_to_coset(&c1, &c2, n, &coset);
         let q = self.alloc(n * 32);
         self.run(
             "pointwise_mul_sub",
@@ -353,54 +401,112 @@ impl MetalProver {
             &[Arg::Buf(ac), Arg::Buf(bc), Arg::Buf(cc), Arg::Buf(&q)],
         );
         let quotient = pack::unpack_fr(&self.read(&q, n * 32));
-
-        let g1 = |ps: &[Affine<Fp>]| self.upload(&pack::pack_g1(ps));
-        let (pa, pb1, pc, ph) = (g1(&zkey.a), g1(&zkey.b1), g1(&zkey.c), g1(&zkey.h));
-        let pb2 = self.upload(&pack::pack_g2(&zkey.b2));
+        let [na, nb1, nc, nh, nb2] = z.counts;
         let private = &witness[zkey.num_public + 1..];
         let msms = Msms {
             h: self.msm(
                 "bucket_sum_g1",
-                &ph,
-                zkey.h.len(),
+                &z.ph,
+                nh,
                 64,
                 &quotient,
                 pack::unpack_jac_g1,
             ),
-            a: self.msm(
-                "bucket_sum_g1",
-                &pa,
-                zkey.a.len(),
-                64,
-                witness,
-                pack::unpack_jac_g1,
-            ),
+            a: self.msm("bucket_sum_g1", &z.pa, na, 64, witness, pack::unpack_jac_g1),
             b1: self.msm(
                 "bucket_sum_g1",
-                &pb1,
-                zkey.b1.len(),
+                &z.pb1,
+                nb1,
                 64,
                 witness,
                 pack::unpack_jac_g1,
             ),
             b2: self.msm::<Fp2>(
                 "bucket_sum_g2",
-                &pb2,
-                zkey.b2.len(),
+                &z.pb2,
+                nb2,
                 128,
                 witness,
                 pack::unpack_jac_g2,
             ),
-            c: self.msm(
-                "bucket_sum_g1",
-                &pc,
-                zkey.c.len(),
-                64,
-                private,
-                pack::unpack_jac_g1,
-            ),
+            c: self.msm("bucket_sum_g1", &z.pc, nc, 64, private, pack::unpack_jac_g1),
         };
         Ok(assemble(zkey, &msms, r, s))
+    }
+}
+
+/// A zkey uploaded once and kept on the device across proofs: the five point
+/// sets (packed), the grouped coefficients with their group starts, the NTT
+/// tables. The host keeps only what assembly and the scatter placement need.
+pub struct ResidentZkey {
+    /// Sizes and the verifying key; every point vector empty.
+    meta: Zkey,
+    a_constraint: Vec<u32>,
+    b_constraint: Vec<u32>,
+    ca: Buffer,
+    sa: Buffer,
+    cb: Buffer,
+    sb: Buffer,
+    n_inv: [u8; 32],
+    lg_n: u32,
+    tb: TransformBuffers,
+    pa: Buffer,
+    pb1: Buffer,
+    pc: Buffer,
+    ph: Buffer,
+    pb2: Buffer,
+    /// Point counts of `a, b1, c, h, b2` (the MSM asserts them against the scalars).
+    counts: [usize; 5],
+}
+
+impl ResidentZkey {
+    /// Bytes held on the device.
+    pub fn device_bytes(&self) -> usize {
+        [
+            &self.ca,
+            &self.sa,
+            &self.cb,
+            &self.sb,
+            &self.tb.forward,
+            &self.tb.inverse,
+            &self.tb.shift,
+            &self.pa,
+            &self.pb1,
+            &self.pc,
+            &self.ph,
+            &self.pb2,
+        ]
+        .iter()
+        .map(|b| b.length() as usize)
+        .sum()
+    }
+
+    /// The circuit's variable count.
+    pub fn num_vars(&self) -> usize {
+        self.meta.num_vars
+    }
+
+    /// The circuit's public input count.
+    pub fn num_public(&self) -> usize {
+        self.meta.num_public
+    }
+}
+
+/// The zkey without its point and coefficient vectors: what `assemble` and
+/// the size checks read.
+fn strip(zkey: &Zkey) -> Zkey {
+    Zkey {
+        num_vars: zkey.num_vars,
+        num_public: zkey.num_public,
+        domain_size: zkey.domain_size,
+        vk: zkey.vk.clone(),
+        ic: zkey.ic.clone(),
+        coefficients: Vec::new(),
+        a: Vec::new(),
+        b1: Vec::new(),
+        b2: Vec::new(),
+        c: Vec::new(),
+        h: Vec::new(),
     }
 }
 

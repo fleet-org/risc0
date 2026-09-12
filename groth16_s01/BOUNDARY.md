@@ -356,8 +356,13 @@ class the fleet's prover nodes are (the builder image is CUDA 13.0.2; the publis
 | transform: 7 polynomials × 2²³ × 32 B + tables                      | ≈ 2.7 GB     |
 | MSM: G1 a, b1, c, h (72 B) + G2 b2 (136 B) + scalars + digits/order | ≈ 3.0 GB     |
 
-So the arm fits any 8 GB card, the M3 Max trivially, and keeping the zkey's points resident across
-calls (the canonical path re-uploads per call, §1) costs about 2.6 GB — the obvious first
-optimisation once correctness is measured. The MSM's bucket-sum launch has only 4095 threads per
-window (the M3 Max has 5,120 INT32 lanes; the RTX 4090 16,384): running all 22 windows in one launch
-is the second.
+So the arm fits any 8 GB card and the M3 Max trivially. **Since C11 the zkey is resident**
+(DEF-G16-014): each arm's backend parses and uploads it once per process, keyed by the file's path,
+length and modification time, and every later proof moves only the witness in and the proof out —
+the canonical path re-maps and re-uploads the 3.45 GiB file on every call. The resident set is the
+five point sets (≈ 2.6 GB), the grouped coefficients and starts (≈ 1.2 GB) and the NTT tables (≈ 0.8
+GB): ≈ 4.6 GB on the production circuit (INFERRED from the measured dimensions), plus ≈ 3 GB of
+per-proof scratch at peak. `RISC0_GROTH16_RESIDENT=0` restores per-call uploads for a device that
+cannot hold it. The MSM's bucket-sum launch still has only 4095 threads per window (the M3 Max has
+5,120 INT32 lanes; the RTX 4090 16,384): running all 22 windows in one launch is the next
+optimisation, after correctness is measured.

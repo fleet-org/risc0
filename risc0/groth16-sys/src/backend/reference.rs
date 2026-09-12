@@ -75,7 +75,9 @@ impl Groth16Backend for Reference {
     }
 }
 
-#[cfg(test)]
+// The Reference kind is registered only under `reference`; other arms compile this module for
+// `random_scalar` alone, so its tests must not run there.
+#[cfg(all(test, feature = "reference"))]
 mod tests {
     use risc0_groth16::{ProofJson, PublicInputsJson, Verifier, VerifyingKeyJson};
     use risc0_groth16_core::{prover::verifying_key_json, zkey::parse_wtns};

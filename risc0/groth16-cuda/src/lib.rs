@@ -45,7 +45,7 @@
 pub mod device;
 pub mod module;
 
-pub use device::{CudaProver, KernelCheck};
+pub use device::{CudaProver, KernelCheck, ResidentZkey};
 pub use module::ModuleSource;
 use risc0_groth16_core::{
     field::Fr,
