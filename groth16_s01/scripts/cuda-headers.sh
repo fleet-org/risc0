@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# CUDA 13 headers without a toolkit or root: the driver-API, runtime, CRT, CCCL and cuRAND dev
+# CUDA 13 headers and the PTX assembler without a toolkit or root: the driver-API, runtime, CRT, CCCL,
+# cuRAND dev and nvcc
 # packages from NVIDIA's Ubuntu 24.04 repository, extracted with dpkg-deb into <dest>. Enough for
 # `cuda-bindings` (bindgen over cuda.h + curand.h), hence for type-checking risc0-groth16-cuda
 # on a machine with no GPU — CI and the CRCS both use it. Prints the two variables to export.
@@ -21,7 +22,8 @@ pick() { # newest Filename of a package
     f && /^Filename:/ { fn = $2 }
     f && /^$/         { print v, fn; f = 0 }' | sort -V | tail -1 | cut -d' ' -f2
 }
-pkgs=(cuda-driver-dev cuda-cudart-dev cuda-crt cuda-cccl libcurand-dev)
+# cuda-nvcc carries ptxas (and nvcc), which cargo-oxide's doctor and ptx-check.sh use; ≈ 30 MB more
+pkgs=(cuda-driver-dev cuda-cudart-dev cuda-crt cuda-cccl libcurand-dev cuda-nvcc)
 for name in "${pkgs[@]}"; do
   p=$name-$series
   f=$(pick "$p")
@@ -40,3 +42,5 @@ root=$(find "$dest/tree" -maxdepth 4 -type d -name "cuda-${series/-/.}*" | head 
 }
 echo "CUDA_HOME=$root"
 echo "CUDA_TOOLKIT_PATH=$root"
+# ptxas lives beside nvcc; callers add it to PATH (a GITHUB_ENV file cannot extend PATH)
+echo "CUDA_BIN=$root/bin"

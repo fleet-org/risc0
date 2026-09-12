@@ -181,6 +181,20 @@ for f in "${present[@]}"; do
   fi
 done
 
+# ---- 3c. the CUDA device module: type-check + clippy on cuda-oxide's pinned nightly (its own
+#          workspace; no toolkit or GPU needed; skipped with a note when the nightly is absent) ------
+for f in "${present[@]}"; do
+  if [[ $f == groth16_s01/cuda-kernels/* ]]; then
+    if rustup run nightly-2026-08-28 rustc --version > /dev/null 2>&1; then
+      (cd groth16_s01/cuda-kernels && cargo +nightly-2026-08-28 clippy --locked -- -D warnings) \
+        > /dev/null 2>&1 || bad "device module: 'cargo +nightly-2026-08-28 clippy' in groth16_s01/cuda-kernels"
+    else
+      say "note: nightly-2026-08-28 not installed — device module check skipped (CI runs it)"
+    fi
+    break
+  fi
+done
+
 # ---- 4. cargo-sort, license headers, clippy — on the crates touched ----------------------------
 crate_of() {
   case "$1" in

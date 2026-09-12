@@ -49,10 +49,14 @@ need() {
 crates=(-p risc0-groth16-core -p risc0-groth16-oxide -p risc0-groth16-cuda -p risc0-groth16-metal
   -p risc0-groth16-sys -p groth16-s01-harness)
 if [ "$rs" = 1 ]; then
+  # the device module is its own workspace (cargo-oxide's nightly), formatted by its manifest
+  device=(--manifest-path groth16_s01/cuda-kernels/Cargo.toml)
   if [ "$mode" = --check ]; then
     cargo fmt --check "${crates[@]}" || fail=1
+    cargo fmt --check "${device[@]}" || fail=1
   else
     cargo fmt "${crates[@]}"
+    cargo fmt "${device[@]}"
   fi
 fi
 pretty=("${md[@]}" "${yml[@]}" "${json[@]}")

@@ -12,6 +12,7 @@ on:
     branches: [integration/staging-platform]
     paths:
       - 'risc0/groth16-core/**'
+      - 'groth16_s01/cuda-kernels/**'
       - 'risc0/groth16-cuda/**'
       - 'risc0/groth16-metal/**'
       - 'risc0/groth16-oxide/**'
@@ -82,6 +83,41 @@ jobs:
           cargo check -p risc0-groth16-sys -p risc0-groth16-core -p risc0-groth16-oxide \
             --target aarch64-apple-darwin --locked
           cargo check -p risc0-groth16-sys --features metal --target aarch64-apple-darwin --locked
+
+  device-module:
+    name: CUDA device module compiles to PTX and assembles for sm_89/sm_120 (no GPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: cuda-oxide's pinned nightly (rust-src, rustc-dev, llvm-tools)
+        run: |
+          rustup toolchain install nightly-2026-08-28 --profile minimal \
+            --component rust-src,rustc-dev,llvm-tools,clippy,rustfmt
+      - name: cargo check + clippy on groth16_s01/cuda-kernels (its own workspace)
+        working-directory: groth16_s01/cuda-kernels
+        run: |
+          cargo +nightly-2026-08-28 check --locked
+          cargo +nightly-2026-08-28 clippy --locked -- -D warnings
+      - name: CUDA 13 headers + ptxas (rootless; no toolkit)
+        run: |
+          groth16_s01/scripts/cuda-headers.sh "$RUNNER_TEMP/cuda" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/cuda/tree/usr/local/cuda-13.0/bin" >> "$GITHUB_PATH"
+      - name: cargo-oxide (the CLI, pinned) and its codegen backend
+        run: |
+          cargo +nightly-2026-08-28 install --git https://github.com/NVlabs/cuda-oxide \
+            --rev 6abfaa091e29a6275c1943895bfbc97efa306e98 cargo-oxide --locked
+          cd groth16_s01/cuda-kernels && cargo +nightly-2026-08-28 oxide setup
+      - name: PTX for sm_89 and sm_120, checked against the ABI and assembled by ptxas
+        run: |
+          cd groth16_s01/cuda-kernels
+          cargo +nightly-2026-08-28 oxide build --arch sm_89
+          cp risc0_groth16_cuda_kernels.ptx "$RUNNER_TEMP/sm_89.ptx"
+          cargo +nightly-2026-08-28 oxide build --arch sm_120
+          cp risc0_groth16_cuda_kernels.ptx "$RUNNER_TEMP/sm_120.ptx"
+          cd ../..
+          groth16_s01/scripts/ptx-check.sh "$RUNNER_TEMP/sm_89.ptx" sm_89 sm_120
+          groth16_s01/scripts/ptx-check.sh "$RUNNER_TEMP/sm_120.ptx" sm_120
 
   harness:
     name: s01/5 harness compiles (CPU prover + reference arm)

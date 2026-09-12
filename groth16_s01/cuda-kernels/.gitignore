@@ -1,0 +1,4 @@
+# build products of `cargo oxide build` (published as fork releases, never committed)
+*.ptx
+*.ll
+/target/
