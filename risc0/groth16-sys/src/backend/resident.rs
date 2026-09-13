@@ -95,6 +95,46 @@ impl<T> Default for Cache<T> {
     }
 }
 
+/// Per-step wall-clock on stderr when `RISC0_GROTH16_TIMING` is set: the
+/// backend's own steps (read, parse, group, upload) around the prover's
+/// phases, so a profile covers the whole call behind the boundary.
+pub struct Stamp {
+    enabled: bool,
+    start: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl Stamp {
+    /// Start the clock.
+    pub fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            enabled: std::env::var_os("RISC0_GROTH16_TIMING").is_some(),
+            start: now,
+            last: now,
+        }
+    }
+
+    /// Print `what` with the time since the previous stamp and since the start.
+    pub fn mark(&mut self, what: &str) {
+        if self.enabled {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "[groth16-backend] {what:<28} {:>8.3} s  (t = {:.3} s)",
+                (now - self.last).as_secs_f64(),
+                (now - self.start).as_secs_f64()
+            );
+            self.last = now;
+        }
+    }
+}
+
+impl Default for Stamp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
