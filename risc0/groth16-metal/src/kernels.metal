@@ -367,6 +367,37 @@ template <typename F> static inline Jac<F> jac_madd(Jac<F> p, Aff<F> q) {
     return r;
 }
 
+// add-2007-bl: Jacobian + Jacobian (the reduction above the bucket sums), the
+// same branches as `Jacobian::add` in risc0-groth16-core: either side at
+// infinity returns the other; h = 0 doubles when rr = 0 and is infinity otherwise.
+template <typename F> static inline Jac<F> jac_add(Jac<F> p, Jac<F> q) {
+    if (jac_is_inf(p))
+        return q;
+    if (jac_is_inf(q))
+        return p;
+    F z1z1 = Ops<F>::sqr(p.z);
+    F z2z2 = Ops<F>::sqr(q.z);
+    F u1 = Ops<F>::mul(p.x, z2z2);
+    F u2 = Ops<F>::mul(q.x, z1z1);
+    F s1 = Ops<F>::mul(Ops<F>::mul(p.y, q.z), z2z2);
+    F s2 = Ops<F>::mul(Ops<F>::mul(q.y, p.z), z1z1);
+    F h = Ops<F>::sub(u2, u1);
+    F rr = Ops<F>::dbl(Ops<F>::sub(s2, s1));
+    if (Ops<F>::is_zero(h)) {
+        if (Ops<F>::is_zero(rr))
+            return jac_dbl(p);
+        return jac_inf<F>();
+    }
+    F i = Ops<F>::sqr(Ops<F>::dbl(h));
+    F j = Ops<F>::mul(h, i);
+    F v = Ops<F>::mul(u1, i);
+    Jac<F> r;
+    r.x = Ops<F>::sub(Ops<F>::sub(Ops<F>::sqr(rr), j), Ops<F>::dbl(v));
+    r.y = Ops<F>::sub(Ops<F>::mul(rr, Ops<F>::sub(v, r.x)), Ops<F>::dbl(Ops<F>::mul(s1, j)));
+    r.z = Ops<F>::mul(Ops<F>::sub(Ops<F>::sub(Ops<F>::sqr(Ops<F>::add(p.z, q.z)), z1z1), z2z2), h);
+    return r;
+}
+
 // ---------------------------------------------------------------- records
 
 // A grouped coefficient as the host packs it (and as preprocessed_coeffs.bin
@@ -504,5 +535,27 @@ kernel void bucket_sum_g2(device const Aff<Fp2>* points [[buffer(0)]],
     Jac<Fp2> acc = jac_inf<Fp2>();
     for (uint k = starts[b]; k < starts[b + 1]; ++k)
         acc = jac_madd(acc, points[order[k]]);
+    out[b] = acc;
+}
+
+// One level of the bounded-chain reduction above the bucket sums
+// (`pipeline::plan_ranges`): out[b] = Σ sums[k] for k in starts[b]..starts[b+1].
+kernel void jacobian_sum_g1(device const Jac<Fp>* sums [[buffer(0)]],
+                            device const uint* starts [[buffer(1)]],
+                            device Jac<Fp>* out [[buffer(2)]],
+                            uint b [[thread_position_in_grid]]) {
+    Jac<Fp> acc = jac_inf<Fp>();
+    for (uint k = starts[b]; k < starts[b + 1]; ++k)
+        acc = jac_add(acc, sums[k]);
+    out[b] = acc;
+}
+
+kernel void jacobian_sum_g2(device const Jac<Fp2>* sums [[buffer(0)]],
+                            device const uint* starts [[buffer(1)]],
+                            device Jac<Fp2>* out [[buffer(2)]],
+                            uint b [[thread_position_in_grid]]) {
+    Jac<Fp2> acc = jac_inf<Fp2>();
+    for (uint k = starts[b]; k < starts[b + 1]; ++k)
+        acc = jac_add(acc, sums[k]);
     out[b] = acc;
 }

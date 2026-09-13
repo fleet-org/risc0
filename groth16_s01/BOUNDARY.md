@@ -211,6 +211,19 @@ through the shaders and compares with the Rust bodies and the core prover — ME
 Mac still has to show is the Metal compiler and the device themselves; the shaders' arithmetic,
 layouts and orchestration are verified here.
 
+**Landed (C21, the MSM's critical path bounded):** the arm's time was one thread's serial chain, not
+the arithmetic. With 12-bit windows the top window of a 254-bit scalar holds two bits, so its three
+non-zero buckets each take a quarter of all points, and the launch waits for those three threads
+(1.4 M mixed additions each on the production circuit; a skewed witness fattens low windows the same
+way). MEASURED with `groth16-cuda-msm-bench` on the RTX 5080: the same kernel ran at 4.5 M
+additions/s with one thread per bucket and at 1.8 G/s over pieces of at most 64 points. The shared
+pipeline now plans the reduction (`pipeline::plan_ranges`): `bucket_sum` over pieces of at most
+`CHUNK` = 64 points, then levels of a new kernel `jacobian_sum` (full Jacobian additions over ranges
+of the previous level's outputs) until one sum per bucket remains — two or three levels for the
+production circuit — and the CPU launcher runs the identical plan under the byte-identical-proof
+test. Twelve kernels in the ABI now; `ptx-c21` carries the PTX; kernel check 15/15 on the device for
+both modules. The host's counting sort (W-14) stays.
+
 **Landed (C15, the CUDA arm on hardware):** on an RTX 5080 (`sm_120`, driver 580.95.05),
 `groth16-cuda-kernel-check` against the `ptx-c13` release passed every kernel, both MSMs and the
 fixture proof for the `sm_120` module and for the `sm_89` module through the driver's JIT —
@@ -409,4 +422,5 @@ streaming proof completed and verified with the device reporting 1.15 GiB free a
 upload (the streaming proof took 139.7 s against 125.7 s resident, the difference being transfers
 and the MSMs running while the tenant was active). The profile is the same in both paths: the five
 MSMs are 139 of the 139.7 s (G2 61 s, h 29 s, the other three G1 ≈ 16 s each), the transforms 0.3 s,
-the scatter 0.5 s — the bucket-sum launch (W-14) is where the time goes.
+the scatter 0.5 s — the bucket-sum launch (W-14) is where the time went, until C21 bounded the chain
+one thread adds (see §3.1 and HARNESS.md for the profile after it).

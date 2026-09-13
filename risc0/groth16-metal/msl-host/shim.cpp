@@ -102,6 +102,14 @@ int msl_run(const msl_char* name, const void* const* args, unsigned nargs, unsig
             bucket_sum_g2(in<Aff<Fp2>>(args, 0), in<uint>(args, 1), in<uint>(args, 2),
                           out<Jac<Fp2>>(args, 3), b);
         }
+    } else if (!std::strcmp(name, "jacobian_sum_g1")) {
+        for (uint b = 0; b < n; b++) {
+            jacobian_sum_g1(in<Jac<Fp>>(args, 0), in<uint>(args, 1), out<Jac<Fp>>(args, 2), b);
+        }
+    } else if (!std::strcmp(name, "jacobian_sum_g2")) {
+        for (uint b = 0; b < n; b++) {
+            jacobian_sum_g2(in<Jac<Fp2>>(args, 0), in<uint>(args, 1), out<Jac<Fp2>>(args, 2), b);
+        }
     } else {
         return 1;
     }

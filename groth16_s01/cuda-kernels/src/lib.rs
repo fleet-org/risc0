@@ -275,4 +275,42 @@ pub mod groth16 {
             };
         }
     }
+
+    /// `abi::JACOBIAN_SUM_G1`
+    #[kernel]
+    pub unsafe fn jacobian_sum_g1(
+        out: *mut Jacobian<Fp>,
+        n: u32,
+        sums: *const Jacobian<Fp>,
+        sums_len: u32,
+        starts: *const u32,
+        starts_len: u32,
+    ) {
+        let b = thread::index_1d().get();
+        if b < n as usize {
+            // SAFETY: as above.
+            unsafe {
+                *out.add(b) = kernels::jacobian_sum(b, sl(sums, sums_len), sl(starts, starts_len))
+            };
+        }
+    }
+
+    /// `abi::JACOBIAN_SUM_G2`
+    #[kernel]
+    pub unsafe fn jacobian_sum_g2(
+        out: *mut Jacobian<Fp2>,
+        n: u32,
+        sums: *const Jacobian<Fp2>,
+        sums_len: u32,
+        starts: *const u32,
+        starts_len: u32,
+    ) {
+        let b = thread::index_1d().get();
+        if b < n as usize {
+            // SAFETY: as above.
+            unsafe {
+                *out.add(b) = kernels::jacobian_sum(b, sl(sums, sums_len), sl(starts, starts_len))
+            };
+        }
+    }
 }

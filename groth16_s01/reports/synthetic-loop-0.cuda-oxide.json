@@ -23,7 +23,7 @@
       "Killed": "rejected before the boundary (bincode): io error: unexpected end of file"
     }
   },
-  "derive_seconds": 25.94657059,
-  "prove_seconds": 149.361551912,
+  "derive_seconds": 26.285687411999998,
+  "prove_seconds": 14.744713956,
   "oracle": "risc0-groth16 3.0.3 (workspace at the milestone base tag v3.0.4) `Verifier` via risc0-zkvm 3.0.4 `Groth16Receipt::verify_integrity_with_context`"
 }

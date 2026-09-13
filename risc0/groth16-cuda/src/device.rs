@@ -32,7 +32,7 @@ use risc0_groth16_core::{
 };
 use risc0_groth16_oxide::{
     abi,
-    pipeline::{reduce_all_windows, sort_all_windows, WINDOW_BITS},
+    pipeline::{plan_ranges, reduce_all_windows, sort_all_windows, CHUNK, WINDOW_BITS},
     schedule::{self, Buf, Step, Twiddles},
 };
 
@@ -319,7 +319,7 @@ impl CudaProver {
     /// — two launches and two reads per MSM instead of two per window.
     fn msm<F: Field + Copy>(
         &self,
-        kernel: &str,
+        kernels: (&str, &str),
         points: &Buffer<Affine<F>>,
         scalars: &[Fr],
     ) -> Result<Jacobian<F>> {
@@ -345,16 +345,34 @@ impl CudaProver {
         if order.is_empty() {
             return Ok(Jacobian::INFINITY);
         }
+        // the bucket sums in pieces of at most CHUNK points, then the levels of
+        // Jacobian sums the plan needs — no thread adds a long chain (C21)
+        let plan = plan_ranges(&starts, CHUNK);
         let order_b = self.upload(&order)?;
-        let starts_b = self.upload(&starts)?;
-        let sums_b: Buffer<Jacobian<F>> = self.alloc(windows * buckets)?;
-        self.run(
-            kernel,
-            ptr(&sums_b),
-            windows * buckets,
-            &[&slice(points)[..], &slice(&order_b), &slice(&starts_b)].concat(),
-        )?;
+        let mut sums_b: Buffer<Jacobian<F>> = {
+            let starts_b = self.upload(&plan[0])?;
+            let o = self.alloc(plan[0].len() - 1)?;
+            self.run(
+                kernels.0,
+                ptr(&o),
+                plan[0].len() - 1,
+                &[&slice(points)[..], &slice(&order_b), &slice(&starts_b)].concat(),
+            )?;
+            o
+        };
+        for level in &plan[1..] {
+            let starts_b = self.upload(level)?;
+            let next: Buffer<Jacobian<F>> = self.alloc(level.len() - 1)?;
+            self.run(
+                kernels.1,
+                ptr(&next),
+                level.len() - 1,
+                &[&slice(&sums_b)[..], &slice(&starts_b)].concat(),
+            )?;
+            sums_b = next;
+        }
         let sums = self.read(&sums_b)?;
+        debug_assert_eq!(sums.len(), windows * buckets);
         phase.mark("  msm: bucket sums + read");
         let result = horner(&reduce_all_windows(&sums, buckets), w);
         phase.mark("  msm: reduce + Horner");
@@ -490,15 +508,15 @@ impl CudaProver {
         };
         let quotient = self.transform_phase(&a_poly, &b_poly, n, &coset, &mut phase)?;
         let private = &witness[zkey.num_public + 1..];
-        let h = self.msm(abi::BUCKET_SUM_G1, &z.ph, &quotient)?;
+        let h = self.msm((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.ph, &quotient)?;
         phase.mark("MSM h (G1)");
-        let a = self.msm(abi::BUCKET_SUM_G1, &z.pa, witness)?;
+        let a = self.msm((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.pa, witness)?;
         phase.mark("MSM a (G1)");
-        let b1 = self.msm(abi::BUCKET_SUM_G1, &z.pb1, witness)?;
+        let b1 = self.msm((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.pb1, witness)?;
         phase.mark("MSM b1 (G1)");
-        let b2 = self.msm::<Fp2>(abi::BUCKET_SUM_G2, &z.pb2, witness)?;
+        let b2 = self.msm::<Fp2>((abi::BUCKET_SUM_G2, abi::JACOBIAN_SUM_G2), &z.pb2, witness)?;
         phase.mark("MSM b2 (G2)");
-        let c = self.msm(abi::BUCKET_SUM_G1, &z.pc, private)?;
+        let c = self.msm((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.pc, private)?;
         phase.mark("MSM c (G1)");
         let msms = Msms { h, a, b1, b2, c };
         let proof = assemble(zkey, &msms, r, s);
@@ -552,7 +570,7 @@ impl CudaProver {
         let private = &witness[zkey.num_public + 1..];
         let msm_g1 = |points: &[Affine<Fp>], scalars: &[Fr]| -> Result<Jacobian<Fp>> {
             let pb = self.upload(points)?;
-            self.msm(abi::BUCKET_SUM_G1, &pb, scalars)
+            self.msm((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &pb, scalars)
         };
         let h = msm_g1(&zkey.h, &quotient)?;
         phase.mark("MSM h (G1, streamed)");
@@ -562,7 +580,7 @@ impl CudaProver {
         phase.mark("MSM b1 (G1, streamed)");
         let b2 = {
             let pb2 = self.upload(&zkey.b2)?;
-            self.msm::<Fp2>(abi::BUCKET_SUM_G2, &pb2, witness)?
+            self.msm::<Fp2>((abi::BUCKET_SUM_G2, abi::JACOBIAN_SUM_G2), &pb2, witness)?
         };
         phase.mark("MSM b2 (G2, streamed)");
         let c = msm_g1(&zkey.c, private)?;
@@ -909,12 +927,54 @@ impl CudaProver {
                 &c.bucket_sums_g2(),
             ),
         );
+        // one level of the reduction above the bucket sums: {B0,B1} {} {B2,B3,B4}
+        fn jacobian_check<F: Field + Copy + std::fmt::Debug>(
+            p: &CudaProver,
+            kernel: &str,
+            sums: &[Jacobian<F>],
+            starts: &[u32],
+            want: &[Jacobian<F>],
+        ) -> Result<String> {
+            let (sb, tb) = (p.upload(sums)?, p.upload(starts)?);
+            let o: Buffer<Jacobian<F>> = p.alloc(want.len())?;
+            p.run(
+                kernel,
+                ptr(&o),
+                want.len(),
+                &[&slice(&sb)[..], &slice(&tb)].concat(),
+            )?;
+            Ok(first_point_diff(&p.read(&o)?, want))
+        }
+        record(
+            abi::JACOBIAN_SUM_G1,
+            jacobian_check(
+                self,
+                abi::JACOBIAN_SUM_G1,
+                &c.bucket_sums_g1(),
+                &c.jstarts,
+                &c.jacobian_sums_g1(),
+            ),
+        );
+        record(
+            abi::JACOBIAN_SUM_G2,
+            jacobian_check(
+                self,
+                abi::JACOBIAN_SUM_G2,
+                &c.bucket_sums_g2(),
+                &c.jstarts,
+                &c.jacobian_sums_g2(),
+            ),
+        );
         // end-to-end MSM (digits + host sort + bucket sums + reduction + Horner)
         record(
             "msm (g1)",
             (|| {
                 let pb = self.upload(&c.msm_g1)?;
-                let got = self.msm(abi::BUCKET_SUM_G1, &pb, &c.msm_scalars)?;
+                let got = self.msm(
+                    (abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1),
+                    &pb,
+                    &c.msm_scalars,
+                )?;
                 Ok(first_point_diff(&[got], &[c.msm_g1()]))
             })(),
         );
@@ -922,7 +982,11 @@ impl CudaProver {
             "msm (g2)",
             (|| {
                 let pb = self.upload(&c.msm_g2)?;
-                let got = self.msm::<Fp2>(abi::BUCKET_SUM_G2, &pb, &c.msm_scalars)?;
+                let got = self.msm::<Fp2>(
+                    (abi::BUCKET_SUM_G2, abi::JACOBIAN_SUM_G2),
+                    &pb,
+                    &c.msm_scalars,
+                )?;
                 Ok(first_point_diff(&[got], &[c.msm_g2()]))
             })(),
         );
@@ -937,5 +1001,70 @@ impl CudaProver {
             );
         }
         Ok(out)
+    }
+}
+
+/// Timed launches for the shape experiments behind W-14
+/// (`groth16-cuda-msm-bench`): the bucket-sum kernel as it is, over ranges
+/// the caller lays out, so the same device code can be measured with the
+/// production layout (one thread per bucket, ≈ 1,400 points each) and with
+/// finer partitions of the same work.
+impl CudaProver {
+    fn sync(&self) -> Result<()> {
+        self.stream
+            .synchronize()
+            .map_err(|e| anyhow!("stream synchronize: {e:?}"))
+    }
+
+    /// The device's free memory, as the phase marks print it.
+    pub fn device_free(&self) -> String {
+        device_free()
+    }
+
+    /// `bucket_sum_g1` over `points` with the ranges `starts[b]..starts[b+1]`
+    /// of `order`, launched `repeats` times. Returns the wall-clock seconds
+    /// of each launch (between two stream synchronizations; the uploads are
+    /// outside) and the sums of the last.
+    pub fn bench_bucket_sum_g1(
+        &self,
+        points: &[Affine<Fp>],
+        order: &[u32],
+        starts: &[u32],
+        repeats: usize,
+    ) -> Result<(Vec<f64>, Vec<Jacobian<Fp>>)> {
+        let points_b = self.upload(points)?;
+        let order_b = self.upload(order)?;
+        let starts_b = self.upload(starts)?;
+        let ranges = starts.len().saturating_sub(1);
+        let sums_b: Buffer<Jacobian<Fp>> = self.alloc(ranges)?;
+        let args = [&slice(&points_b)[..], &slice(&order_b), &slice(&starts_b)].concat();
+        let mut secs = Vec::with_capacity(repeats);
+        for _ in 0..repeats {
+            self.sync()?;
+            let t = std::time::Instant::now();
+            self.run(abi::BUCKET_SUM_G1, ptr(&sums_b), ranges, &args)?;
+            self.sync()?;
+            secs.push(t.elapsed().as_secs_f64());
+        }
+        let sums = self.read(&sums_b)?;
+        Ok((secs, sums))
+    }
+
+    /// `pointwise_mul` over `n` elements, `repeats` times — a bandwidth-bound
+    /// launch, the yardstick for what the device gives this process.
+    pub fn bench_pointwise_mul(&self, n: usize, repeats: usize) -> Result<Vec<f64>> {
+        let a: Vec<Fr> = (0..n).map(|i| Fr::from_u64(i as u64 + 1)).collect();
+        let a_b = self.upload(&a)?;
+        let out_b: Buffer<Fr> = self.alloc(n)?;
+        let args = [&slice(&a_b)[..], &slice(&a_b)].concat();
+        let mut secs = Vec::with_capacity(repeats);
+        for _ in 0..repeats {
+            self.sync()?;
+            let t = std::time::Instant::now();
+            self.run(abi::POINTWISE_MUL, ptr(&out_b), n, &args)?;
+            self.sync()?;
+            secs.push(t.elapsed().as_secs_f64());
+        }
+        Ok(secs)
     }
 }

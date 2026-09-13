@@ -129,14 +129,72 @@ pub fn sort_all_windows(digits: &[u32], n: usize, buckets: usize) -> (Vec<u32>, 
     (order, starts)
 }
 
+/// The longest chain one thread adds in an MSM's bucket sums, and in every
+/// level of the reduction above them. MEASURED on an RTX 5080 (C21,
+/// `groth16-cuda-msm-bench`, 2^20 uniform scalars, 22 windows, the same
+/// kernel): one thread per bucket ran at 4.5 M additions/s, because the top
+/// window — two bits of a 254-bit scalar — puts a quarter of all points into
+/// each of three buckets and the launch waits for those three threads;
+/// pieces of at most 64 ran at 1.8 G/s (32: 1.7 G/s; 256: 1.0 G/s; 1024:
+/// 0.6 G/s). A skewed witness (small values) fattens low windows the same
+/// way; the plan bounds every chain regardless.
+pub const CHUNK: u32 = 64;
+
+/// Split every range of `starts` (contiguous ranges over one sequence, as
+/// `sort_all_windows` lays them out) into pieces of at most `chunk` entries;
+/// an empty range stays one empty piece. Returns the pieces, as `starts`
+/// over the same sequence, and the groups: for each original range the
+/// range of piece indices that belong to it (`groups.len() == starts.len()`).
+pub fn chunk_ranges(starts: &[u32], chunk: u32) -> (Vec<u32>, Vec<u32>) {
+    assert!(chunk > 0, "a piece holds at least one entry");
+    let mut pieces = Vec::with_capacity(starts.len());
+    let mut groups = Vec::with_capacity(starts.len());
+    for w in starts.windows(2) {
+        let (from, to) = (w[0], w[1]);
+        assert!(from <= to, "ranges are non-decreasing");
+        groups.push(pieces.len() as u32);
+        let mut at = from;
+        loop {
+            pieces.push(at);
+            if to - at <= chunk {
+                break;
+            }
+            at += chunk;
+        }
+    }
+    groups.push(pieces.len() as u32);
+    pieces.push(*starts.last().expect("starts has a terminator"));
+    (pieces, groups)
+}
+
+/// The launch plan that sums every range of `starts` with no thread adding
+/// more than `chunk` entries: `levels[0]` are ranges over the original
+/// sequence (for `bucket_sum`); `levels[k]`, `k ≥ 1`, ranges over the
+/// outputs of level `k − 1` (for `jacobian_sum`); the last level has one
+/// range per original range, in order. One level when no range exceeds
+/// `chunk`; a range of `m` entries needs `⌈log_chunk m⌉` levels.
+pub fn plan_ranges(starts: &[u32], chunk: u32) -> Vec<Vec<u32>> {
+    let mut levels = Vec::new();
+    let (mut pieces, mut groups) = chunk_ranges(starts, chunk);
+    loop {
+        levels.push(pieces);
+        if groups.windows(2).all(|w| w[1] - w[0] == 1) {
+            return levels;
+        }
+        (pieces, groups) = chunk_ranges(&groups, chunk);
+    }
+}
+
 /// Window sums from the flat bucket sums (`windows · buckets` entries).
 pub fn reduce_all_windows<F: Field>(sums: &[Jacobian<F>], buckets: usize) -> Vec<Jacobian<F>> {
     sums.chunks_exact(buckets).map(reduce_buckets).collect()
 }
 
 /// A multi-scalar multiplication over every window at once: one digits
-/// launch, one host sort, one bucket-sum launch, then the reduction and
-/// Horner on the host — two launches per MSM instead of two per window.
+/// launch, one host sort, one bucket-sum launch over pieces of at most
+/// [`CHUNK`] points, the levels of `jacobian_sum` the plan needs (two or
+/// three for the production circuit), then the reduction and Horner on the
+/// host.
 pub fn msm<L: Launcher, F: Field + Send + Sync>(
     l: &L,
     points: &[Affine<F>],
@@ -151,10 +209,17 @@ pub fn msm<L: Launcher, F: Field + Send + Sync>(
     let mut digits = vec![0u32; windows * n];
     l.map(&mut digits, |i| kernels::digit_all(i, &canonical, w));
     let (order, starts) = sort_all_windows(&digits, n, buckets);
-    let mut sums = vec![Jacobian::<F>::INFINITY; windows * buckets];
+    let plan = plan_ranges(&starts, CHUNK);
+    let mut sums = vec![Jacobian::<F>::INFINITY; plan[0].len() - 1];
     l.map(&mut sums, |b| {
-        kernels::bucket_sum(b, points, &order, &starts)
+        kernels::bucket_sum(b, points, &order, &plan[0])
     });
+    for level in &plan[1..] {
+        let mut next = vec![Jacobian::<F>::INFINITY; level.len() - 1];
+        l.map(&mut next, |b| kernels::jacobian_sum(b, &sums, level));
+        sums = next;
+    }
+    debug_assert_eq!(sums.len(), windows * buckets);
     horner(&reduce_all_windows(&sums, buckets), w)
 }
 
@@ -238,7 +303,7 @@ mod tests {
     use ark_ff::{BigInteger as _, PrimeField as _};
     use ark_groth16::Groth16;
     use risc0_groth16_core::{
-        ec::{G1Affine, G2Affine},
+        ec::{g1_generator, G1Affine, G2Affine},
         field::Fp,
         fp2::Fp2,
         ntt::{self, lg2},
@@ -332,6 +397,55 @@ mod tests {
         assert_eq!(mine, expected);
         let par = h_to_coset(&CpuLauncher { threads: 5 }, data, &t);
         assert_eq!(par, expected, "chunked launcher agrees with serial");
+    }
+
+    #[test]
+    fn a_plan_bounds_every_chain_and_ends_one_range_per_bucket() {
+        // buckets of 0, 1, 64, 65, 1000 and 70_000 entries, chunk 64
+        let sizes = [0u32, 1, 64, 65, 1000, 70_000];
+        let mut starts = vec![0u32];
+        for s in sizes {
+            starts.push(starts.last().unwrap() + s);
+        }
+        let plan = plan_ranges(&starts, 64);
+        assert_eq!(
+            plan.len(),
+            3,
+            "70_000 → 1094 → 18 → 1: the pieces, then two levels above them"
+        );
+        for level in &plan {
+            assert!(
+                level.windows(2).all(|w| w[1] - w[0] <= 64),
+                "no chain above 64"
+            );
+        }
+        assert_eq!(
+            plan.last().unwrap().len(),
+            sizes.len() + 1,
+            "one range per bucket at the end"
+        );
+        // the sums agree with the direct ones
+        let seq: Vec<Jacobian<Fp>> = (0..*starts.last().unwrap())
+            .map(|i| {
+                g1_generator()
+                    .to_jacobian()
+                    .mul(&Fr::from_u64(u64::from(i) % 7 + 1))
+            })
+            .collect();
+        let direct: Vec<Jacobian<Fp>> = (0..sizes.len())
+            .map(|b| kernels::jacobian_sum(b, &seq, &starts))
+            .collect();
+        let mut sums: Vec<Jacobian<Fp>> = (0..plan[0].len() - 1)
+            .map(|b| kernels::jacobian_sum(b, &seq, &plan[0]))
+            .collect();
+        for level in &plan[1..] {
+            sums = (0..level.len() - 1)
+                .map(|b| kernels::jacobian_sum(b, &sums, level))
+                .collect();
+        }
+        assert_eq!(sums, direct);
+        // a plan with nothing to split is one level, the ranges themselves
+        assert_eq!(plan_ranges(&[0, 3, 3, 10], 64), vec![vec![0, 3, 3, 10]]);
     }
 
     #[test]

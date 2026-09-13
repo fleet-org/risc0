@@ -12,6 +12,10 @@ publish = false
 name = "groth16-cuda-kernel-check"
 path = "src/bin/kernel-check.rs"
 
+[[bin]]
+name = "groth16-cuda-msm-bench"
+path = "src/bin/msm-bench.rs"
+
 [dependencies]
 anyhow = "1"
 # The published host runtime of NVlabs/cuda-oxide: driver API, dlopens libcuda at run time, needs

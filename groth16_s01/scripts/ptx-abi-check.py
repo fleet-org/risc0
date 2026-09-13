@@ -24,6 +24,8 @@ ABI = {
     "digits_all": "pupuu",  # out, n_total, scalars, len, w
     "bucket_sum_g1": "pupupupu",  # out, n, points, len, order, len, starts, len
     "bucket_sum_g2": "pupupupu",
+    "jacobian_sum_g1": "pupupu",  # out, n, sums, len, starts, len
+    "jacobian_sum_g2": "pupupu",
 }
 
 

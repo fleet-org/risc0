@@ -39,7 +39,7 @@ use risc0_groth16_core::{
     zkey::Zkey,
 };
 pub use risc0_groth16_oxide::check::KernelCheck;
-use risc0_groth16_oxide::pipeline::{reduce_all_windows, sort_all_windows};
+use risc0_groth16_oxide::pipeline::{plan_ranges, reduce_all_windows, sort_all_windows, CHUNK};
 
 use crate::{pack, WINDOW_BITS};
 
@@ -55,6 +55,8 @@ pub const KERNELS: &[&str] = &[
     "digits_all",
     "bucket_sum_g1",
     "bucket_sum_g2",
+    "jacobian_sum_g1",
+    "jacobian_sum_g2",
 ];
 
 /// One kernel argument, in `[[buffer(i)]]` order: a buffer, or a small
@@ -207,11 +209,14 @@ impl<B: Backend> Prover<B> {
 
     /// One MSM over every window at once: one `digits_all` launch, the host
     /// sort (`pipeline::sort_all_windows`), one `bucket_sum` launch over
-    /// `windows · buckets` outputs, then the reduction and Horner on the host
-    /// — two launches and two reads per MSM instead of two per window.
+    /// pieces of at most [`CHUNK`] points, then the levels of `jacobian_sum`
+    /// the plan (`pipeline::plan_ranges`) needs until there is one sum per
+    /// `(window, bucket)`, then the reduction and Horner on the host — no
+    /// thread adds a long chain (C21). `kernels` names the bucket-sum and the
+    /// Jacobian-sum kernel of the group.
     fn msm<F: Field>(
         &self,
-        kernel: &str,
+        kernels: (&str, &str),
         points: &B::Buf,
         n_points: usize,
         point_bytes: usize,
@@ -245,21 +250,41 @@ impl<B: Backend> Prover<B> {
         if order.is_empty() {
             return Jacobian::INFINITY;
         }
-        let order_b = self.upload(&u32s(&order));
-        let starts_b = self.upload(&u32s(&starts));
+        // the bucket sums in pieces of at most CHUNK points, then the levels of
+        // Jacobian sums the plan needs — no thread adds a long chain (C21)
+        let plan = plan_ranges(&starts, CHUNK);
         let sum_bytes = point_bytes * 3 / 2;
-        let sums = self.alloc(windows * buckets * sum_bytes);
-        self.run(
-            kernel,
-            windows * buckets,
-            &[
-                Arg::Buf(points),
-                Arg::Buf(&order_b),
-                Arg::Buf(&starts_b),
-                Arg::Buf(&sums),
-            ],
-        );
-        let jac = unpack(&self.read(&sums, windows * buckets * sum_bytes));
+        let order_b = self.upload(&u32s(&order));
+        let mut len = plan[0].len() - 1;
+        let mut sums = {
+            let starts_b = self.upload(&u32s(&plan[0]));
+            let o = self.alloc(len * sum_bytes);
+            self.run(
+                kernels.0,
+                len,
+                &[
+                    Arg::Buf(points),
+                    Arg::Buf(&order_b),
+                    Arg::Buf(&starts_b),
+                    Arg::Buf(&o),
+                ],
+            );
+            o
+        };
+        for level in &plan[1..] {
+            let starts_b = self.upload(&u32s(level));
+            let next_len = level.len() - 1;
+            let next = self.alloc(next_len * sum_bytes);
+            self.run(
+                kernels.1,
+                next_len,
+                &[Arg::Buf(&sums), Arg::Buf(&starts_b), Arg::Buf(&next)],
+            );
+            sums = next;
+            len = next_len;
+        }
+        let jac = unpack(&self.read(&sums, len * sum_bytes));
+        debug_assert_eq!(jac.len(), windows * buckets);
         horner(&reduce_all_windows(&jac, buckets), w)
     }
 
@@ -452,7 +477,7 @@ impl<B: Backend> Prover<B> {
         let private = &witness[zkey.num_public + 1..];
         let g1 = |points, count, scalars: &[Fr]| {
             self.msm(
-                "bucket_sum_g1",
+                ("bucket_sum_g1", "jacobian_sum_g1"),
                 points,
                 count,
                 64,
@@ -465,7 +490,7 @@ impl<B: Backend> Prover<B> {
             a: g1(&z.pa, na, witness),
             b1: g1(&z.pb1, nb1, witness),
             b2: self.msm::<Fp2>(
-                "bucket_sum_g2",
+                ("bucket_sum_g2", "jacobian_sum_g2"),
                 &z.pb2,
                 nb2,
                 128,
@@ -632,11 +657,42 @@ impl<B: Backend> Prover<B> {
                 first_point_diff(&got, &c.bucket_sums_g2()),
             ));
         }
+        // one level of the reduction above the bucket sums: {B0,B1} {} {B2,B3,B4}
+        let jsb = self.upload(&u32s(&c.jstarts));
+        let jn = c.jstarts.len() - 1;
+        {
+            let jb = self.upload(&pack::pack_jac_g1(&c.bucket_sums_g1()));
+            let sums = self.alloc(jn * 96);
+            self.run(
+                "jacobian_sum_g1",
+                jn,
+                &[Arg::Buf(&jb), Arg::Buf(&jsb), Arg::Buf(&sums)],
+            );
+            let got = pack::unpack_jac_g1(&self.read(&sums, jn * 96));
+            out.push(KernelCheck::from_detail(
+                "jacobian_sum_g1",
+                first_point_diff(&got, &c.jacobian_sums_g1()),
+            ));
+        }
+        {
+            let jb = self.upload(&pack::pack_jac_g2(&c.bucket_sums_g2()));
+            let sums = self.alloc(jn * 192);
+            self.run(
+                "jacobian_sum_g2",
+                jn,
+                &[Arg::Buf(&jb), Arg::Buf(&jsb), Arg::Buf(&sums)],
+            );
+            let got = pack::unpack_jac_g2(&self.read(&sums, jn * 192));
+            out.push(KernelCheck::from_detail(
+                "jacobian_sum_g2",
+                first_point_diff(&got, &c.jacobian_sums_g2()),
+            ));
+        }
         // end-to-end MSM (digits + host sort + bucket sums + reduction + Horner)
         {
             let pb = self.upload(&pack::pack_g1(&c.msm_g1));
             let got = self.msm(
-                "bucket_sum_g1",
+                ("bucket_sum_g1", "jacobian_sum_g1"),
                 &pb,
                 c.msm_g1.len(),
                 64,
@@ -649,7 +705,7 @@ impl<B: Backend> Prover<B> {
             ));
             let pb2 = self.upload(&pack::pack_g2(&c.msm_g2));
             let got = self.msm::<Fp2>(
-                "bucket_sum_g2",
+                ("bucket_sum_g2", "jacobian_sum_g2"),
                 &pb2,
                 c.msm_g2.len(),
                 128,
@@ -997,7 +1053,7 @@ mod host_tests {
     fn shaders_on_the_cpu_agree_with_the_rust_bodies_down_to_a_fixture_proof() {
         let prover = HostMslProver::new().unwrap();
         let checks = prover.kernel_check().unwrap();
-        assert_eq!(checks.len(), 13, "10 kernels, 2 MSMs, 1 proof");
+        assert_eq!(checks.len(), 15, "12 kernels, 2 MSMs, 1 proof");
         for c in &checks {
             assert!(c.ok, "{}: {}", c.kernel, c.detail);
         }
