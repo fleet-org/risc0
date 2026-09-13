@@ -43,6 +43,15 @@ full-SHA permalink.
 
 ## What remains, and who holds the key
 
+**Deliverable state (decision, 2026-09-13).** Both provers are rewritten at the
+`risc0_groth16_sys::prove` boundary and PROPOSED on `integration/staging-platform`; verification is
+established only as far as assertion 1 — the reference verifier ACCEPTS the rewrite's proof on the
+synthetic cases, mutations rejected (§ HARNESS.md). By explicit decision this session, the GPU
+end-to-end, the canonical differential (assertions 2/3), and the corpus are DEFERRED, and the
+escalation for a device window / production access is to be raised WHEN those resources exist — not
+now. `integration → main` stays P3 (flag ready; do not self-promote). The items below are that
+deferred work, with who holds each key.
+
 | item                                                 | blocked on                                                            | what unblocks it                                                                                                                                                                                                                                                                                                                                                                                   |
 | ---------------------------------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | s01/3 corpus (assertions 2 and 3 on production data) | production access (E1)                                                | run `CORPUS.md` §2 where the agent's `DATABASE_URL`/`S3_*` are set; freeze as a GitHub Release on this fork                                                                                                                                                                                                                                                                                        |
