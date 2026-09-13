@@ -56,9 +56,17 @@ implementation.
 ## VRAM-aware path selection (`Budget::choose(free, 0.9)`)
 
 `RISC0_GROTH16_RESIDENT` is tristate: `0`/`false`/`off` forces streaming, any other value forces
-resident, and **unset is AUTO** — the backend reads the device's free memory (`cuMemGetInfo`) once,
-keeps 10 % as headroom, and picks resident if its peak fits, else streaming if its peak fits, else
-fails fast (the proof does not fit even streaming). The chosen decision is logged on stderr.
+resident, and **unset is AUTO** — the backend reads the device's free memory (`cuMemGetInfo`), keeps
+10 % as headroom, and picks resident if its peak fits, else streaming if its peak fits, else fails
+fast (the proof does not fit even streaming). The chosen decision is logged on stderr.
+
+**On a shared device the reading is not enough (C24).** The free line swings as a co-tenant
+allocates, so AUTO takes the MINIMUM over several readings (`min_free_device_bytes`), and — because
+even that can be stale between the probe and the upload — a resident attempt that hits an
+out-of-memory FALLS BACK to streaming for that call (the bbstark P5.2 adaptive pattern): the cache
+is evicted to free the partial resident set, the zkey is re-read, and the proof completes streaming.
+So AUTO produces a verified proof whatever the co-tenant does: it runs resident when the device
+really holds it, and degrades to streaming when it does not, without an operator flag.
 
 | device                       | free (GiB) | usable (0.9) | chosen       |
 | ---------------------------- | ---------: | -----------: | ------------ |
@@ -83,5 +91,6 @@ follow-ups so this change stays additive and reviewable:
 1. A **bump-arena allocator with checkpoint/restore** (one `cudaMalloc`, `checkpoint()` after the
    resident upload, `restore()` after each proof) to remove per-proof `cudaMalloc`/`cudaFree` churn.
 2. **MSM scratch reused across the five MSMs** (one buffer sized to the largest) plus an **adaptive
-   OOM → k-way chunk fallback** (bbstark's P5.2).
+   OOM → k-way chunk fallback** WITHIN an MSM (bbstark's P5.2 at the kernel level; C24 applies the
+   same adaptive idea at the coarser resident→streaming grain).
 3. **Entrypoint-drives-all-allocations** as a grep-auditable invariant.

@@ -1103,6 +1103,23 @@ impl CudaProver {
         (rc == 0).then_some(free)
     }
 
+    /// The MINIMUM free memory across `samples` readings a short interval
+    /// apart — the conservative figure for a device shared with another
+    /// tenant, whose free memory swings as it allocates and frees; a single
+    /// reading can catch a lull the tenant is about to end.
+    pub fn min_free_device_bytes(&self, samples: usize) -> Option<usize> {
+        let mut lo: Option<usize> = None;
+        for i in 0..samples.max(1) {
+            if let Some(f) = self.free_device_bytes() {
+                lo = Some(lo.map_or(f, |m| m.min(f)));
+            }
+            if i + 1 < samples {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+        lo
+    }
+
     /// `bucket_sum_g1` over `points` with the ranges `starts[b]..starts[b+1]`
     /// of `order`, launched `repeats` times. Returns the wall-clock seconds
     /// of each launch (between two stream synchronizations; the uploads are

@@ -104,6 +104,14 @@ impl<T> Cache<T> {
             .and_then(|(k, v)| (k == key).then(|| v.clone()))
     }
 
+    /// Drop whatever is cached, freeing its device memory once the last handle
+    /// is dropped — used when a resident proof runs out of memory and the
+    /// backend falls back to streaming.
+    pub fn evict(&self) {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = None;
+    }
+
     pub fn get_or_prepare(&self, key: Key, prepare: impl FnOnce() -> Result<T>) -> Result<Arc<T>> {
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((k, v)) = slot.as_ref() {

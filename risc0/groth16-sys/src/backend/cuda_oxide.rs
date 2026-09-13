@@ -69,13 +69,15 @@ impl Groth16Backend for CudaOxide {
                 let (zkey, groups) = load_zkey(path, &mut stamp)?;
                 let device = CudaProver::new(ModuleSource::from_env()?)?;
                 let budget = budget::Budget::new(budget::Dims::from_zkey(&zkey));
-                let free = device.free_device_bytes();
+                // The MINIMUM over several readings, not one: on a shared device
+                // the free line swings as the co-tenant allocates.
+                let free = device.min_free_device_bytes(4);
                 let mode = free
                     .and_then(|f| budget.choose(f, 0.9))
                     .unwrap_or(budget::Mode::Streaming);
                 eprintln!(
                     "[groth16-backend] budget: resident peak {:.2} GiB, streaming peak {:.2} GiB; \
-                     device free {}; auto -> {:?}",
+                     device free(min) {}; auto -> {:?}",
                     budget.resident_peak_bytes() as f64 / GIB,
                     budget.streaming_peak_bytes() as f64 / GIB,
                     free.map(|f| format!("{:.2} GiB", f as f64 / GIB))
@@ -86,17 +88,54 @@ impl Groth16Backend for CudaOxide {
                     budget::Mode::Streaming => {
                         run_streaming(prover, &device, &zkey, &groups, &mut stamp)
                     }
+                    // A shared device's free reading can be stale between the
+                    // probe and the upload; fall back to streaming on an
+                    // out-of-memory (the bbstark P5.2 adaptive pattern), so AUTO
+                    // still produces a proof when the co-tenant took the window.
                     budget::Mode::Resident => {
-                        let resident = device.prepare_owned(zkey, groups)?;
-                        stamp.mark("prepare (upload, resident)");
-                        let p =
-                            CACHE.get_or_prepare(key, move || Ok(Prepared { device, resident }))?;
-                        run_resident(prover, &p)
+                        match try_resident(prover, device, zkey, groups, key, &mut stamp) {
+                            Ok(()) => Ok(()),
+                            Err(e) if is_oom(&e) => {
+                                CACHE.evict();
+                                eprintln!(
+                                    "[groth16-backend] resident path out of memory ({e:#}); \
+                                     falling back to streaming"
+                                );
+                                let mut stamp = resident::Stamp::new();
+                                let (zkey, groups) = load_zkey(path, &mut stamp)?;
+                                let device = CudaProver::new(ModuleSource::from_env()?)?;
+                                run_streaming(prover, &device, &zkey, &groups, &mut stamp)
+                            }
+                            Err(e) => Err(e),
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/// Upload the zkey, cache it, and prove resident — the resident attempt AUTO
+/// makes before falling back to streaming on out-of-memory. Consumes `zkey`.
+fn try_resident(
+    prover: &ProverParams,
+    device: CudaProver,
+    zkey: Zkey,
+    groups: CoefficientGroups,
+    key: resident::Key,
+    stamp: &mut resident::Stamp,
+) -> anyhow::Result<()> {
+    let resident = device.prepare_owned(zkey, groups)?;
+    stamp.mark("prepare (upload, resident)");
+    let p = CACHE.get_or_prepare(key, move || Ok(Prepared { device, resident }))?;
+    run_resident(prover, &p)
+}
+
+/// Whether an error is a device out-of-memory (the shared-tenant race), so AUTO
+/// falls back to streaming rather than failing the proof.
+fn is_oom(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_ascii_lowercase();
+    s.contains("out of memory") || s.contains("outofmemory") || s.contains("drivererror(2")
 }
 
 /// One GiB, for the budget log line.
