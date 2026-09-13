@@ -80,12 +80,31 @@ impl Phase {
         if self.enabled {
             let now = std::time::Instant::now();
             eprintln!(
-                "[groth16-cuda] {what:<28} {:>8.3} s  (t = {:.3} s)",
+                "[groth16-cuda] {what:<28} {:>8.3} s  (t = {:.3} s; device free {})",
                 (now - self.last).as_secs_f64(),
-                (now - self.start).as_secs_f64()
+                (now - self.start).as_secs_f64(),
+                device_free()
             );
             self.last = now;
         }
+    }
+}
+
+/// The device's free memory as "x.xx GiB", for the phase marks (the arm's
+/// footprint beside the other tenant's), or "?" when it cannot be read.
+fn device_free() -> String {
+    let (mut free, mut total) = (0usize, 0usize);
+    // SAFETY: a plain driver query on the thread's current context; the
+    // out-pointers are valid for the call.
+    let rc = unsafe { cuda_core::sys::cuMemGetInfo_v2(&mut free, &mut total) };
+    if rc == 0 {
+        format!(
+            "{:.2} GiB of {:.2}",
+            free as f64 / 2f64.powi(30),
+            total as f64 / 2f64.powi(30)
+        )
+    } else {
+        "?".into()
     }
 }
 
@@ -580,8 +599,10 @@ impl CudaProver {
     }
 
     /// From the A and B polynomials to the quotient's coset evaluations:
-    /// C = A∘B, three coset transforms, the pointwise quotient; the seven
-    /// polynomial buffers are freed on return.
+    /// C = A∘B, three coset transforms, the pointwise quotient. Four
+    /// polynomial buffers at most: each transform's free ping-pong buffer is
+    /// the next one's scratch, and the last free one holds the quotient —
+    /// 1 GB of polynomials on the production circuit instead of 1.8 GB.
     fn transform_phase(
         &self,
         a_poly: &[Fr],
@@ -590,9 +611,8 @@ impl CudaProver {
         coset: &CosetTables<'_>,
         phase: &mut Phase,
     ) -> Result<Vec<Fr>> {
-        let (a1, a2) = (self.upload(a_poly)?, self.alloc::<Fr>(n)?);
-        let (b1, b2) = (self.upload(b_poly)?, self.alloc::<Fr>(n)?);
-        let (c1, c2) = (self.alloc::<Fr>(n)?, self.alloc::<Fr>(n)?);
+        let (a1, b1) = (self.upload(a_poly)?, self.upload(b_poly)?);
+        let c1 = self.alloc::<Fr>(n)?;
         self.run(
             abi::POINTWISE_MUL,
             ptr(&c1),
@@ -600,19 +620,36 @@ impl CudaProver {
             &[&slice(&a1)[..], &slice(&b1)].concat(),
         )?;
         phase.mark("polynomial uploads, C = A∘B");
-        let ac = self.h_to_coset(&a1, &a2, n, coset)?;
-        let bc = self.h_to_coset(&b1, &b2, n, coset)?;
-        let cc = self.h_to_coset(&c1, &c2, n, coset)?;
-        let q: Buffer<Fr> = self.alloc(n)?;
+        let scratch = self.alloc::<Fr>(n)?;
+        // each transform returns (its result, the buffer it left free)
+        let (ac, free) = self.coset_pair(a1, scratch, n, coset)?;
+        let (bc, free) = self.coset_pair(b1, free, n, coset)?;
+        let (cc, q) = self.coset_pair(c1, free, n, coset)?;
         self.run(
             abi::POINTWISE_MUL_SUB,
             ptr(&q),
             n,
-            &[&slice(ac)[..], &slice(bc), &slice(cc)].concat(),
+            &[&slice(&ac)[..], &slice(&bc), &slice(&cc)].concat(),
         )?;
         let quotient = self.read(&q)?;
         phase.mark("3 coset transforms, quotient");
         Ok(quotient)
+    }
+
+    /// The coset transform of `a` with `b` as scratch: the buffer holding the
+    /// result and the one left free, by the schedule's word.
+    fn coset_pair(
+        &self,
+        a: Buffer<Fr>,
+        b: Buffer<Fr>,
+        n: usize,
+        coset: &CosetTables<'_>,
+    ) -> Result<(Buffer<Fr>, Buffer<Fr>)> {
+        let result_is_a = {
+            let r = self.h_to_coset(&a, &b, n, coset)?;
+            std::ptr::eq(r, &a)
+        };
+        Ok(if result_is_a { (a, b) } else { (b, a) })
     }
 }
 

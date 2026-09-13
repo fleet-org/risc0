@@ -396,3 +396,17 @@ flat (`pipeline::sort_all_windows`) — 22 round trips per MSM become 2, and the
 22 × 4,095 threads instead of 4,095 (the M3 Max has 5,120 INT32 lanes; the RTX 4090 16,384). The CPU
 launcher runs the same orchestration under the byte-identical-proof test, so the structure is
 verified before either device runs it; a device-side sort is the next step after that.
+
+**The streaming path (C18, C19) is the budget for a shared device.** `RISC0_GROTH16_RESIDENT=0`
+selects `CudaProver::prove_streaming`: nothing stays resident, each phase uploads what it reads and
+frees it before the next, and the transform phase runs in four polynomial buffers instead of seven
+(each transform's free ping-pong buffer becomes the next one's scratch; the last free buffer holds
+the quotient). Per-phase peaks, INFERRED from the measured dimensions: scatter ≈ 2.1 GB, transform ≈
+1.8 GB (4 × 2²³ × 32 B + tables), MSM ≈ 2.0 GB (the largest point set, its scalars, digits and
+order). MEASURED (RTX 5080 shared with another tenant, synthetic-loop-0, 2026-09-13): a whole
+streaming proof completed and verified with the device reporting 1.15 GiB free at the lowest sample
+(during the MSM of h), i.e. the arm fits in what the tenant's peak leaves; the price is the per-call
+upload (the streaming proof took 139.7 s against 125.7 s resident, the difference being transfers
+and the MSMs running while the tenant was active). The profile is the same in both paths: the five
+MSMs are 139 of the 139.7 s (G2 61 s, h 29 s, the other three G1 ≈ 16 s each), the transforms 0.3 s,
+the scatter 0.5 s — the bucket-sum launch (W-14) is where the time goes.
