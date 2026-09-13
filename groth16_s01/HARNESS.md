@@ -142,13 +142,30 @@ The session container was recycled onto a box with an NVIDIA GeForce RTX 5080 (`
 580.95.05). The arm ran from the `ptx-c13` release's PTX, unchanged since it was built and validated
 without a GPU (C13); the driver's user-space library was fetched rootless at the module's version.
 
-| case                | rewrite    | rewrite verifies (1)                                                     | bit-flip | cross-claim | canonical answers | malformed input | derive s | prove s |
-| ------------------- | ---------- | ------------------------------------------------------------------------ | -------- | ----------- | ----------------- | --------------- | -------: | ------: |
-| synthetic-loop-100k | cuda-oxide | **yes**                                                                  | killed   | killed      | killed            | killed          |     26.1 |   125.7 |
-| synthetic-loop-0    | cuda-oxide | not run: `DriverError(2, "out of memory")` uploading a 256 MB polynomial |          |             |                   |                 |     25.7 |       — |
+| case                | rewrite                | rewrite verifies (1) | bit-flip | cross-claim | canonical answers | malformed input | derive s | prove s |
+| ------------------- | ---------------------- | -------------------- | -------- | ----------- | ----------------- | --------------- | -------: | ------: |
+| synthetic-loop-100k | cuda-oxide             | **yes**              | killed   | killed      | killed            | killed          |     26.1 |   125.7 |
+| synthetic-loop-0    | cuda-oxide (streaming) | **yes** (2026-09-13) | killed   | killed      | killed            | killed          |     25.9 |   149.4 |
 
 Assertions 2 and 3 remain _not run_ (no canonical output: E1). Full rows in
-[`reports/synthetic-loop-100k.cuda-oxide.md`](./reports/synthetic-loop-100k.cuda-oxide.md).
+[`reports/synthetic-loop-100k.cuda-oxide.md`](./reports/synthetic-loop-100k.cuda-oxide.md) and
+[`reports/synthetic-loop-0.cuda-oxide.md`](./reports/synthetic-loop-0.cuda-oxide.md).
+
+**The second case, through the streaming path (C18, C19) — MEASURED 2026-09-13.** The first attempt
+at synthetic-loop-0 (2026-09-12) died uploading a 256 MB polynomial: the resident arm on the other
+tenant's peak. With `RISC0_GROTH16_RESIDENT=0` the arm streams (nothing resident, ≈ 2 GB on the
+device at peak) and proved the case beside the tenant's activity: verified under the upstream
+verifier, every mutation arm killed. The 149.4 s are 8.6 s of zkey read, parse and grouping on the
+host (paid per call on the streaming path, once per process on the resident one) and 139.7 s on the
+device. The device's free memory, printed at every phase mark, moved between 1.15 and 11.2 GiB
+during the run — the tenant cycles every 15–30 s, and the arm fit in what it left.
+
+**The profile** (`RISC0_GROTH16_TIMING=1`, the streaming run): scatter 0.5 s; the three coset
+transforms and the quotient 0.3 s; the five MSMs 139.0 s — h 28.8, a 16.3, b1 16.1, b2 (G2) 61.1, c
+16.5 — of which the host's counting sorts are 0.2–0.9 s each and the reductions 0.05–0.2 s. The
+bucket-sum launch is 99 % of the proof: one thread per (window, bucket) walking its bucket's points
+serially, 22 × 4,095 threads for 5.6 M points, most buckets long and the tail buckets idle. That is
+W-14 in the register, and the next change to the arm.
 
 **What the numbers mean.** The arm's first production-scale proof on a device verifies under the
 upstream verifier with every mutation arm killed. 125.7 s is an unoptimised arm — serial bucket
@@ -177,11 +194,17 @@ memory five times two seconds apart and exits non-zero when the minimum is below
 allocating. On this box, minutes after the passing run, three samples read 2.5–3.2 GiB free: the
 other tenant held ≈ 13 GB. A run started then would have failed, and might have failed the tenant.
 `RISC0_GROTH16_RESIDENT=0` makes the CUDA arm stream: every phase uploads what it needs and frees it
-before the next, ≈ 2.6 GB on the device instead of ≈ 8 GB resident, so the arm fits beside the other
-tenant's peak at the price of re-uploading the zkey per proof. `RISC0_GROTH16_TIMING=1` makes the
-CUDA prover print per-phase wall-clock (uploads, scatter, the three coset transforms, each MSM's
-host sort / bucket sums / reduction, assembly) to stderr, so a granted window yields a profile and
-not only a total.
+before the next, ≈ 2 GB on the device instead of ≈ 8 GB resident, so the arm fits beside the other
+tenant's peak at the price of re-uploading the zkey per proof (≈ 2 GB since C19, which runs the
+transform phase in four buffers). `RISC0_GROTH16_TIMING=1` makes the CUDA prover print per-phase
+wall-clock (uploads, scatter, the three coset transforms, each MSM's host sort / bucket sums /
+reduction, assembly) to stderr, so a granted window yields a profile and not only a total.
+
+A short sample window is no guarantee for a step that needs the tenant idle: on 2026-09-13 the
+canonical control (≈ 7 GiB) met `cudaMallocAsync … out of memory` 29 s after three samples had read
+10.3–11.4 GiB free. The waiter for such a step is `GPU_FREE_MIN_GIB=10.5 gpu-free.py 30 2` — a full
+minute with every sample above the line, which on this box means the tenant is between jobs — and
+the streaming arm (2.5 GiB) is what runs when the tenant is not.
 
 ### The production circuit through the Metal shaders on the CPU (`metal-cpu`), control = `reference` — MEASURED 2026-09-12
 
