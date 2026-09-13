@@ -40,15 +40,20 @@ impl Groth16Backend for Metal {
     fn prove(&self, prover: &ProverParams, setup: &SetupParams) -> anyhow::Result<()> {
         let path = setup.srs_path.as_path();
         let prepare = || -> anyhow::Result<Prepared> {
+            let mut stamp = resident::Stamp::new();
             let mut zkey = {
                 let zkey_bytes = std::fs::read(path)
                     .with_context(|| format!("reading zkey {}", path.display()))?;
+                stamp.mark("zkey read");
                 Zkey::parse(&zkey_bytes).context("parsing zkey")?
             };
+            stamp.mark("zkey parse");
             let groups = CoefficientGroups::from_zkey(&zkey);
             zkey.coefficients = Vec::new();
+            stamp.mark("coefficient groups");
             let device = MetalProver::new()?;
             let resident = device.prepare_owned(zkey, groups);
+            stamp.mark("prepare (upload, resident)");
             Ok(Prepared { device, resident })
         };
         let p = if resident::enabled() {
@@ -61,10 +66,12 @@ impl Groth16Backend for Metal {
         let witness = parse_witness_values(witness_bytes)
             .map_err(|i| anyhow!("witness value {i} is not a field element"))?;
         let (r, s) = (random_scalar()?, random_scalar()?);
+        let mut stamp = resident::Stamp::new();
         let proof = p
             .device
             .prove_resident(&p.resident, &witness, &r, &s)
             .context("metal prover")?;
+        stamp.mark("prove (witness in, proof out)");
         std::fs::write(
             prover.public_path.as_path(),
             public_json(&witness, num_public),

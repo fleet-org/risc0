@@ -15,7 +15,8 @@ bento's lockfile pins `risc0-groth16 3.0.3` + `risc0-groth16-sys 0.1.0` — the 
 | [`CORPUS.md`](./CORPUS.md)                 | s01/3 · #4 | capture recipe, coverage axes, manifest schema, freeze rules                                 |
 
 | [`HARNESS.md`](./HARNESS.md) | s01/5 · #7 | the differential harness: oracle, assertions, mutation
-arms, measured results (`harness/`, `reports/`) | |
+| [`WORKAROUNDS.md`](./WORKAROUNDS.md) | all | the register of workarounds, stubs and shortcuts for
+expert review (W-01…) | arms, measured results (`harness/`, `reports/`) | |
 [`../handoffs/cs-groth16-risc0-groth16-snark-m1.handback.md`](../handoffs/cs-groth16-risc0-groth16-snark-m1.handback.md)
 | handback | what landed where, what remains and who holds the key, what the artifacts do not show |
 
