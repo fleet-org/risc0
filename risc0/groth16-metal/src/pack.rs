@@ -15,8 +15,10 @@
 //! Byte layouts the kernels read, produced from the shared Rust types:
 //! field elements as 32 Montgomery bytes, G1 points as 64, G2 as 128 (the
 //! zkey's own layouts), grouped coefficients as 48-byte records (signal at
-//! 0, value at 16 — `preprocessed_coeffs.bin`'s record), and Jacobian
-//! results back into `risc0-groth16-core` points.
+//! 0, value at 16 — `preprocessed_coeffs.bin`'s record), Jacobian points as
+//! 96 (G1) or 192 (G2) bytes both ways — the bucket sums a `jacobian_sum`
+//! level reads are the previous level's results — and Jacobian results back
+//! into `risc0-groth16-core` points.
 
 use risc0_groth16_core::{
     coeff::GroupedCoeff,
@@ -100,6 +102,33 @@ pub fn pack_coeffs(cs: &[GroupedCoeff]) -> Vec<u8> {
     out
 }
 
+/// Pack Jacobian G1 points as 96 bytes each (X, Y, Z Montgomery; infinity
+/// has Z = 0) — the inverse of [`unpack_jac_g1`], what `jacobian_sum_g1`
+/// reads.
+pub fn pack_jac_g1(ps: &[Jacobian<Fp>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ps.len() * 96);
+    for p in ps {
+        for c in [&p.x, &p.y, &p.z] {
+            out.extend_from_slice(&limbs_bytes(&c.montgomery_limbs()));
+        }
+    }
+    out
+}
+
+/// Pack Jacobian G2 points as 192 bytes each (X, Y, Z in Fp2, `c0` then
+/// `c1`) — the inverse of [`unpack_jac_g2`], what `jacobian_sum_g2` reads.
+pub fn pack_jac_g2(ps: &[Jacobian<Fp2>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ps.len() * 192);
+    for p in ps {
+        for c in [&p.x, &p.y, &p.z] {
+            for f in [&c.c0, &c.c1] {
+                out.extend_from_slice(&limbs_bytes(&f.montgomery_limbs()));
+            }
+        }
+    }
+    out
+}
+
 /// Read Jacobian G1 results (96 bytes each: X, Y, Z Montgomery).
 pub fn unpack_jac_g1(bytes: &[u8]) -> Vec<Jacobian<Fp>> {
     bytes
@@ -179,6 +208,24 @@ mod tests {
             bytes.extend_from_slice(&limbs_bytes(&v.montgomery_limbs()));
         }
         assert_eq!(unpack_jac_g1(&bytes)[0], j);
+        let js = [j, Jacobian::INFINITY];
+        let packed = pack_jac_g1(&js);
+        assert_eq!(packed.len(), 192);
+        assert_eq!(packed[..96], bytes[..]);
+        assert_eq!(unpack_jac_g1(&packed), js, "G1 Jacobian round-trips");
+        let j2 = Jacobian {
+            x: Fp2::new(Fp::ONE, Fp::from_u64(2)),
+            y: Fp2::new(Fp::from_u64(3), Fp::from_u64(4)),
+            z: Fp2::new(Fp::from_u64(5), Fp::from_u64(6)),
+        };
+        let js2 = [j2, Jacobian::INFINITY];
+        let packed2 = pack_jac_g2(&js2);
+        assert_eq!(packed2.len(), 384);
+        assert_eq!(
+            packed2[32..64],
+            limbs_bytes(&Fp::from_u64(2).montgomery_limbs())
+        );
+        assert_eq!(unpack_jac_g2(&packed2), js2, "G2 Jacobian round-trips");
     }
 
     #[test]
@@ -198,6 +245,8 @@ mod tests {
             "kernel void digits",
             "kernel void bucket_sum_g1",
             "kernel void bucket_sum_g2",
+            "kernel void jacobian_sum_g1",
+            "kernel void jacobian_sum_g2",
         ] {
             assert!(src.contains(needle), "missing {needle}");
         }

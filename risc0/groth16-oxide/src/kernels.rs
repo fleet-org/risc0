@@ -122,3 +122,17 @@ pub fn bucket_sum<F: Field>(
     }
     acc
 }
+
+/// Sum of the Jacobian points `sums[starts[b]..starts[b + 1]]` — one level
+/// of the bounded-chain reduction above `bucket_sum`
+/// (`pipeline::plan_ranges`): the pieces of a bucket, then the pieces of
+/// those, until one thread's chain is short everywhere.
+#[inline]
+pub fn jacobian_sum<F: Field>(b: usize, sums: &[Jacobian<F>], starts: &[u32]) -> Jacobian<F> {
+    let (from, to) = (starts[b] as usize, starts[b + 1] as usize);
+    let mut acc = Jacobian::INFINITY;
+    for s in &sums[from..to] {
+        acc = acc.add(s);
+    }
+    acc
+}

@@ -167,6 +167,61 @@ bucket-sum launch is 99 % of the proof: one thread per (window, bucket) walking 
 serially, 22 × 4,095 threads for 5.6 M points, most buckets long and the tail buckets idle. That is
 W-14 in the register, and the next change to the arm.
 
+### The MSM's critical path, found and bounded (C21) — MEASURED 2026-09-13
+
+The static reading of the kernel (3,951 lines of PTX for `bucket_sum_g1`, 144 wide multiplies, 118
+registers, modest local traffic) predicted about 1 G additions/s and could not explain a launch at 8
+M/s. One microbenchmark could: `groth16-cuda-msm-bench` runs the bucket-sum kernel unchanged over a
+range layout of the caller's choosing (the kernel's contract is only "`starts[b]..starts[b+1]` is my
+run of `order`"), on 2^20 uniform scalars and 2^16 distinct G1 points tiled to 2^20, all 22 windows
+— 22.5 M additions per launch in every row:
+
+| layout (same kernel, same additions)                            |    ranges | per range | M additions/s (3 launches) |
+| --------------------------------------------------------------- | --------: | --------: | -------------------------: |
+| one thread per (window, bucket) — the arm's layout before C21   |    90,090 |       250 |                  4.2 – 5.0 |
+| the same, gathering from a 4.7 MB point set that stays in cache |    90,090 |       250 |                  4.2 – 5.3 |
+| pieces of at most 1024 points                                   |    90,601 |       249 |                  410 – 870 |
+| pieces of at most 256                                           |   133,709 |       169 |                860 – 1,100 |
+| pieces of at most 128                                           |   221,751 |       102 |                740 – 1,060 |
+| pieces of at most 64                                            |   397,839 |        57 |              1,800 – 1,810 |
+| pieces of at most 32                                            |   750,103 |        30 |              1,420 – 1,780 |
+| pieces of at most 8                                             | 2,859,176 |         8 |              1,050 – 2,270 |
+
+**The tail.** "250 per range" is an average that hides the launch's critical path: with 12-bit
+windows the top window of a scalar below 2^253 (the bench) holds one varying bit, so one bucket
+receives half of all points — 524,288 serial mixed additions in one thread, about 5 s, which is the
+whole launch's time. On the production circuit (scalars below 2^254) the top window has two bits and
+three such buckets of n/4 ≈ 1.4 M points each: ≈ 14 s for a G1 MSM at ≈ 10 µs per serial addition,
+2.1 M for `h` (28 s), and the G2 MSM's addition is four times the cost (61 s) — the profile above,
+line by line. A skewed witness (small values, booleans) fattens the low windows' first buckets the
+same way. The memory system is not involved: the cached-gather row is no faster.
+
+**The bound.** The shared pipeline plans the reduction (`pipeline::plan_ranges`): the bucket-sum
+launch runs over pieces of at most `CHUNK` = 64 points; then a new kernel, `jacobian_sum` (full
+Jacobian additions over ranges of the previous level's outputs), runs one level per ⌈log₆₄⌉ of the
+longest bucket — two or three levels for the production circuit — until one sum per (window, bucket)
+remains, and the host reduces the windows as before. The plan is data, computed once per MSM from
+the sorted layout, so the CPU launcher, the CUDA host and the Metal host execute the same levels;
+the fixture proof stays byte-identical through all three. The kernel contract did not change; the
+ABI grew by two names (`jacobian_sum_g1`, `jacobian_sum_g2`), `kernel-check` reports 15 checks —
+15/15 on the RTX 5080 for the `sm_120` and the `sm_89` module (`ptx-c21`).
+
+**The production circuit after the bound — MEASURED 2026-09-13, RTX 5080 shared with the other
+tenant, streaming path.** synthetic-loop-100k through `cuda-oxide`: verified under the upstream
+verifier, every mutation arm killed; the harness's prove column 15.9 s, of which 8.6 s is the
+streaming path's per-call zkey read, parse and grouping on the host and 6.0 s the device — the five
+MSMs 5.2 s (h 1.84, a 0.76, b1 0.80, b2 (G2) 0.98, c 0.78) against 139 s before; the scatter 0.47 s,
+the transforms 0.29 s. Inside an MSM the bucket-sum launch is now 0.04–0.14 s and the levels above
+it are inside that figure; what remains is the host: the counting sort (0.21 s per witness MSM, 0.90
+s for h), the digits round trip and the `order` upload (≈ 0.5 s per MSM, the rest of each line), and
+the per-window reduction (0.05 s; 0.19 s for G2). The resident path (the zkey uploaded once per
+process) would drop the 8.6 s per call; it needs ≈ 8 GB of device memory and a lull, so it is
+INFERRED here from the C15 resident run's non-MSM phases, not measured on this shared device.
+synthetic-loop-0 the same minute: verified, every arm killed, prove 14.7 s (device 5.9 s: the five
+MSMs 5.1 s — h 1.89, a 0.73, b1 0.71, b2 1.05, c 0.71). Reports:
+[`reports/synthetic-loop-100k.cuda-oxide.md`](./reports/synthetic-loop-100k.cuda-oxide.md),
+[`reports/synthetic-loop-0.cuda-oxide.md`](./reports/synthetic-loop-0.cuda-oxide.md).
+
 **What the numbers mean.** The arm's first production-scale proof on a device verifies under the
 upstream verifier with every mutation arm killed. 125.7 s is an unoptimised arm — serial bucket
 loops per thread, the host's counting sort of 22 × 5.6M digits per MSM, 493 MB read back per MSM —

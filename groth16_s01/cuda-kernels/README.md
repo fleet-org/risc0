@@ -44,16 +44,21 @@ the backend rejects; the field types compare limb-wise now. The PTX files are at
 `ptx-c13` release (SHA-256 in the release notes), so the CUDA host can start at stage 2 without the
 toolchain.
 
-What to expect from `kernel-check`What to expect from `kernel-check`: it names the first kernel or
-composite step (`msm (g1)`, `msm (g2)`, `proof (fixture)`) whose output differs from
-`risc0_groth16_oxide::kernels`, on the shared cases of `risc0_groth16_oxide::check` — the same cases
-the Metal arm's check runs.
+What to expect from `kernel-check`: it names the first kernel or composite step (`msm (g1)`,
+`msm (g2)`, `proof (fixture)`) whose output differs from `risc0_groth16_oxide::kernels`, on the
+shared cases of `risc0_groth16_oxide::check` — the same cases the Metal arm's check runs.
 
 First hardware run (MEASURED, C15, on an RTX 5080 with the 580.95.05 driver — the fleet's `sm_120`
 class): `groth16-cuda-kernel-check` against the `ptx-c13` release passed 13/13 for the `sm_120`
 module and for the `sm_89` module through the driver's JIT, unchanged from what was built without a
 GPU. The container had only the device nodes; `libnvidia-compute-580` at the module's exact version,
 fetched rootless from NVIDIA's repository onto `LD_LIBRARY_PATH`, was all `cuda-core` needed.
+
+Since C21 the module has twelve kernels (`jacobian_sum_g1`/`_g2` — one level of the bounded-chain
+reduction above the bucket sums, `pipeline::plan_ranges`) and `kernel-check` reports 15 checks; the
+`ptx-c21` release carries the PTX (1.18 MB per target: the full Jacobian addition inlined twice).
+`groth16-cuda-msm-bench` times the bucket-sum kernel alone under a chosen range layout (`--chunk C`,
+`--tiny`, `--check`) — the experiment that found the MSM's critical path (HARNESS.md).
 
 Still UNVERIFIED after that: cudart/driver-API context coexistence in one bento process (needs the
 canonical path built with nvcc beside the arm) and timing against the canonical kernels (the same

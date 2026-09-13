@@ -230,3 +230,17 @@ the template's two UNVERIFIED points and corrected one statement above:
   the launch: verdict items 4 (artifact shape) and the template review's open points are settled by
   hardware; item 5 (coexistence with the cudart HAL in one process) remains for the
   canonical-beside- the-arm build.
+
+## Addendum (C21) — twelve kernels, the release `ptx-c21`, MEASURED 2026-09-13
+
+- **Two kernels added** (`jacobian_sum_g1`, `jacobian_sum_g2`: ranges of Jacobian points summed with
+  the full addition), the same `#[kernel]` shape as the bucket sums; `cargo oxide build` on the
+  pinned toolchain emitted both modules unchanged in procedure (1.18 MB each, `.version 8.7`);
+  `ptx-abi-check.py` 12/12; `ptxas` assembles `sm_120` for `sm_120` and `sm_89` for `sm_89`;
+  `kernel-check` 15/15 on the RTX 5080 for both modules. Nothing new was asked of the backend: the
+  full Jacobian addition lowers like the mixed one (224 registers, 1,088 bytes of stack for G2 — the
+  same order as `bucket_sum_g2`).
+- **What the device taught (I-G16-031):** the arm's slowness was never codegen. The PTX of
+  `bucket_sum_g1` is 3,951 lines with 144 wide multiplies and modest local traffic, and the same
+  kernel ran at 1.8 G additions/s once no thread's chain was long. The pin's verdict stands; the
+  performance work is orchestration, which the shared crate owns for both arms.

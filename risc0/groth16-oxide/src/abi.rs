@@ -73,6 +73,13 @@ pub const DIGITS_ALL: &str = "digits_all";
 pub const BUCKET_SUM_G1: &str = "bucket_sum_g1";
 /// The same over G2 (`Affine<Fp2>` in, `Jacobian<Fp2>` out).
 pub const BUCKET_SUM_G2: &str = "bucket_sum_g2";
+/// `out[b] = Σ sums[j]` for `j` in `starts[b]..starts[b+1]` over G1 Jacobian
+/// inputs — one level of the bounded-chain reduction above the bucket sums
+/// (`pipeline::plan_ranges`). Params: `out, n, sums, sums_len, starts,
+/// starts_len`.
+pub const JACOBIAN_SUM_G1: &str = "jacobian_sum_g1";
+/// The same over G2 (`Jacobian<Fp2>` in and out).
+pub const JACOBIAN_SUM_G2: &str = "jacobian_sum_g2";
 
 /// Every kernel the device module must export, by name.
 pub const KERNELS: &[&str] = &[
@@ -86,6 +93,8 @@ pub const KERNELS: &[&str] = &[
     DIGITS_ALL,
     BUCKET_SUM_G1,
     BUCKET_SUM_G2,
+    JACOBIAN_SUM_G1,
+    JACOBIAN_SUM_G2,
 ];
 
 /// Blocks for `n` outputs.
@@ -122,6 +131,6 @@ mod tests {
         assert_eq!(blocks(1), 1);
         assert_eq!(blocks(BLOCK), 1);
         assert_eq!(blocks(BLOCK + 1), 2);
-        assert_eq!(KERNELS.len(), 10);
+        assert_eq!(KERNELS.len(), 12);
     }
 }

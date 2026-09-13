@@ -94,6 +94,9 @@ pub struct Cases {
     pub order: Vec<u32>,
     /// Bucket starts: `{G,2G,3G} {∞} {G,−G} {} {5G..8G}`.
     pub bstarts: Vec<u32>,
+    /// Ranges over the bucket sums for `jacobian_sum`: `{B0,B1} {} {B2,B3,B4}`
+    /// (a two-term sum, an empty range, a run through infinity).
+    pub jstarts: Vec<u32>,
     /// 64 G1 points for the end-to-end MSM.
     pub msm_g1: Vec<Affine<Fp>>,
     /// 64 G2 points for the end-to-end MSM.
@@ -170,6 +173,7 @@ impl Cases {
             g2,
             order: vec![0, 1, 2, 8, 0, 9, 4, 5, 6, 7],
             bstarts: vec![0, 3, 4, 6, 6, 10],
+            jstarts: vec![0, 2, 2, 5],
             msm_g1,
             msm_g2,
         }
@@ -254,6 +258,22 @@ impl Cases {
     pub fn bucket_sums_g2(&self) -> Vec<Jacobian<Fp2>> {
         (0..self.buckets())
             .map(|b| kernels::bucket_sum(b, &self.g2, &self.order, &self.bstarts))
+            .collect()
+    }
+
+    /// Expected G1 `jacobian_sum` over the G1 bucket sums with `jstarts`.
+    pub fn jacobian_sums_g1(&self) -> Vec<Jacobian<Fp>> {
+        let sums = self.bucket_sums_g1();
+        (0..self.jstarts.len() - 1)
+            .map(|b| kernels::jacobian_sum(b, &sums, &self.jstarts))
+            .collect()
+    }
+
+    /// Expected G2 `jacobian_sum` over the G2 bucket sums with `jstarts`.
+    pub fn jacobian_sums_g2(&self) -> Vec<Jacobian<Fp2>> {
+        let sums = self.bucket_sums_g2();
+        (0..self.jstarts.len() - 1)
+            .map(|b| kernels::jacobian_sum(b, &sums, &self.jstarts))
             .collect()
     }
 
