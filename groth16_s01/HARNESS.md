@@ -176,9 +176,12 @@ memory five times two seconds apart and exits non-zero when the minimum is below
 `GPU_FREE_MIN_GIB` of your choosing); a swing above 1 GiB between samples means another tenant is
 allocating. On this box, minutes after the passing run, three samples read 2.5–3.2 GiB free: the
 other tenant held ≈ 13 GB. A run started then would have failed, and might have failed the tenant.
-`RISC0_GROTH16_TIMING=1` makes the CUDA prover print per-phase wall-clock (uploads, scatter, the
-three coset transforms, each MSM's host sort / bucket sums / reduction, assembly) to stderr, so a
-granted window yields a profile and not only a total.
+`RISC0_GROTH16_RESIDENT=0` makes the CUDA arm stream: every phase uploads what it needs and frees it
+before the next, ≈ 2.6 GB on the device instead of ≈ 8 GB resident, so the arm fits beside the other
+tenant's peak at the price of re-uploading the zkey per proof. `RISC0_GROTH16_TIMING=1` makes the
+CUDA prover print per-phase wall-clock (uploads, scatter, the three coset transforms, each MSM's
+host sort / bucket sums / reduction, assembly) to stderr, so a granted window yields a profile and
+not only a total.
 
 ### The production circuit through the Metal shaders on the CPU (`metal-cpu`), control = `reference` — MEASURED 2026-09-12
 
