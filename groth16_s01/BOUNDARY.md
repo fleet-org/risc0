@@ -218,7 +218,9 @@ MEASURED, first launch, no change since the GPU-less build. The production-circu
 through the GPU is reported in HARNESS.md. `metal-cpu` (the Metal shaders on the CPU) is the sixth
 kind, a testing kind on every target but macOS; the boundary crate's tests run the reference
 backend's three fixture properties for every compiled-in kind through one helper, including
-`cuda-oxide` on the device.
+`cuda-oxide` on the device. Since C18 the CUDA arm has two proof paths behind one boundary: resident
+(the zkey uploaded once per process, DEF-G16-014) and streaming (`RISC0_GROTH16_RESIDENT=0`: upload
+and free per phase, ≈ 2.6 GB on the device), for a device shared with another tenant.
 
 Constraints this satisfies: the canonical path stays selectable on every build that has it
 (definition of done #2); selecting an unavailable backend is an error, never a silent fallback

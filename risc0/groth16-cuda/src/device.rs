@@ -456,70 +456,20 @@ impl CudaProver {
         s: &Fr,
     ) -> Result<Proof> {
         let zkey = &z.meta;
-        if witness.len() != zkey.num_vars {
-            return Err(ProveError::WitnessLength {
-                expected: zkey.num_vars,
-                found: witness.len(),
-            }
-            .into());
-        }
-        if witness[0] != Fr::ONE {
-            return Err(ProveError::WitnessConstant.into());
-        }
+        check_witness(zkey, witness)?;
         let n = zkey.domain_size;
         let mut phase = Phase::new();
         let witness_b = self.upload(witness)?;
         phase.mark("witness upload");
-        // scatter A and B (group sums on the device), placed at their constraint
-        // indices on the host
-        let scatter =
-            |cb: &Buffer<GroupedCoeff>, sb: &Buffer<u32>, cons: &[u32]| -> Result<Vec<Fr>> {
-                let out: Buffer<Fr> = self.alloc(cons.len())?;
-                self.run(
-                    abi::SCATTER_GROUP,
-                    ptr(&out),
-                    cons.len(),
-                    &[&slice(cb)[..], &slice(sb), &slice(&witness_b)].concat(),
-                )?;
-                let sums = self.read(&out)?;
-                let mut poly = vec![Fr::ZERO; n];
-                for (c, v) in cons.iter().zip(sums) {
-                    poly[*c as usize] = v;
-                }
-                Ok(poly)
-            };
-        let a_poly = scatter(&z.ca, &z.sa, &z.a_constraint)?;
-        let b_poly = scatter(&z.cb, &z.sb, &z.b_constraint)?;
+        let a_poly = self.scatter_phase(&z.ca, &z.sa, &z.a_constraint, &witness_b, n)?;
+        let b_poly = self.scatter_phase(&z.cb, &z.sb, &z.b_constraint, &witness_b, n)?;
         phase.mark("scatter A, B (+ placement)");
-        let (a1, a2) = (self.upload(&a_poly)?, self.alloc::<Fr>(n)?);
-        let (b1, b2) = (self.upload(&b_poly)?, self.alloc::<Fr>(n)?);
-        let (c1, c2) = (self.alloc::<Fr>(n)?, self.alloc::<Fr>(n)?);
-        self.run(
-            abi::POINTWISE_MUL,
-            ptr(&c1),
-            n,
-            &[&slice(&a1)[..], &slice(&b1)].concat(),
-        )?;
         let coset = CosetTables {
             n_inv: z.n_inv,
             lg_n: z.lg_n,
             tb: &z.tb,
         };
-        phase.mark("polynomial uploads, C = A∘B");
-        let ac = self.h_to_coset(&a1, &a2, n, &coset)?;
-        let bc = self.h_to_coset(&b1, &b2, n, &coset)?;
-        let cc = self.h_to_coset(&c1, &c2, n, &coset)?;
-        let q: Buffer<Fr> = self.alloc(n)?;
-        self.run(
-            abi::POINTWISE_MUL_SUB,
-            ptr(&q),
-            n,
-            &[&slice(ac)[..], &slice(bc), &slice(cc)].concat(),
-        )?;
-        let quotient = self.read(&q)?;
-        phase.mark("3 coset transforms, quotient");
-        // free the per-proof polynomial buffers (7 × n × 32 B) before the MSMs
-        drop((a1, a2, b1, b2, c1, c2, q));
+        let quotient = self.transform_phase(&a_poly, &b_poly, n, &coset, &mut phase)?;
         let private = &witness[zkey.num_public + 1..];
         let h = self.msm(abi::BUCKET_SUM_G1, &z.ph, &quotient)?;
         phase.mark("MSM h (G1)");
@@ -536,6 +486,149 @@ impl CudaProver {
         phase.mark("assembly");
         Ok(proof)
     }
+
+    /// Produce a proof with NOTHING resident: every phase uploads what it
+    /// needs and frees it before the next — the smallest device footprint
+    /// (≈ 2.6 GB on the production circuit against ≈ 8 GB resident), for a
+    /// device shared with another tenant; the price is re-uploading the zkey
+    /// per proof (≈ 5 GB, a fraction of a second over PCIe). The backend
+    /// selects it with `RISC0_GROTH16_RESIDENT=0` (W-04's mitigation).
+    pub fn prove_streaming(
+        &self,
+        zkey: &Zkey,
+        groups: &CoefficientGroups,
+        witness: &[Fr],
+        r: &Fr,
+        s: &Fr,
+    ) -> Result<Proof> {
+        check_witness(zkey, witness)?;
+        let n = zkey.domain_size;
+        let t = Tables::new(n);
+        let mut phase = Phase::new();
+        let witness_b = self.upload(witness)?;
+        phase.mark("witness upload");
+        let a_poly = {
+            let (cb, sb) = (self.upload(&groups.a)?, self.upload(&groups.a_starts)?);
+            self.scatter_phase(&cb, &sb, &groups.a_constraint, &witness_b, n)?
+        };
+        let b_poly = {
+            let (cb, sb) = (self.upload(&groups.b)?, self.upload(&groups.b_starts)?);
+            self.scatter_phase(&cb, &sb, &groups.b_constraint, &witness_b, n)?
+        };
+        phase.mark("scatter A, B (+ placement, streamed)");
+        let quotient = {
+            let tb = TransformBuffers {
+                forward: self.upload(&t.forward)?,
+                inverse: self.upload(&t.inverse)?,
+                shift: self.upload(&t.shift_powers)?,
+            };
+            let coset = CosetTables {
+                n_inv: t.n_inv,
+                lg_n: t.lg_n,
+                tb: &tb,
+            };
+            self.transform_phase(&a_poly, &b_poly, n, &coset, &mut phase)?
+        };
+        drop((a_poly, b_poly, t));
+        let private = &witness[zkey.num_public + 1..];
+        let msm_g1 = |points: &[Affine<Fp>], scalars: &[Fr]| -> Result<Jacobian<Fp>> {
+            let pb = self.upload(points)?;
+            self.msm(abi::BUCKET_SUM_G1, &pb, scalars)
+        };
+        let h = msm_g1(&zkey.h, &quotient)?;
+        phase.mark("MSM h (G1, streamed)");
+        let a = msm_g1(&zkey.a, witness)?;
+        phase.mark("MSM a (G1, streamed)");
+        let b1 = msm_g1(&zkey.b1, witness)?;
+        phase.mark("MSM b1 (G1, streamed)");
+        let b2 = {
+            let pb2 = self.upload(&zkey.b2)?;
+            self.msm::<Fp2>(abi::BUCKET_SUM_G2, &pb2, witness)?
+        };
+        phase.mark("MSM b2 (G2, streamed)");
+        let c = msm_g1(&zkey.c, private)?;
+        phase.mark("MSM c (G1, streamed)");
+        let msms = Msms { h, a, b1, b2, c };
+        let proof = assemble(zkey, &msms, r, s);
+        phase.mark("assembly");
+        Ok(proof)
+    }
+
+    /// Scatter one matrix: group sums on the device, placed at their
+    /// constraint indices on the host.
+    fn scatter_phase(
+        &self,
+        cb: &Buffer<GroupedCoeff>,
+        sb: &Buffer<u32>,
+        cons: &[u32],
+        witness_b: &Buffer<Fr>,
+        n: usize,
+    ) -> Result<Vec<Fr>> {
+        let out: Buffer<Fr> = self.alloc(cons.len())?;
+        self.run(
+            abi::SCATTER_GROUP,
+            ptr(&out),
+            cons.len(),
+            &[&slice(cb)[..], &slice(sb), &slice(witness_b)].concat(),
+        )?;
+        let sums = self.read(&out)?;
+        let mut poly = vec![Fr::ZERO; n];
+        for (c, v) in cons.iter().zip(sums) {
+            poly[*c as usize] = v;
+        }
+        Ok(poly)
+    }
+
+    /// From the A and B polynomials to the quotient's coset evaluations:
+    /// C = A∘B, three coset transforms, the pointwise quotient; the seven
+    /// polynomial buffers are freed on return.
+    fn transform_phase(
+        &self,
+        a_poly: &[Fr],
+        b_poly: &[Fr],
+        n: usize,
+        coset: &CosetTables<'_>,
+        phase: &mut Phase,
+    ) -> Result<Vec<Fr>> {
+        let (a1, a2) = (self.upload(a_poly)?, self.alloc::<Fr>(n)?);
+        let (b1, b2) = (self.upload(b_poly)?, self.alloc::<Fr>(n)?);
+        let (c1, c2) = (self.alloc::<Fr>(n)?, self.alloc::<Fr>(n)?);
+        self.run(
+            abi::POINTWISE_MUL,
+            ptr(&c1),
+            n,
+            &[&slice(&a1)[..], &slice(&b1)].concat(),
+        )?;
+        phase.mark("polynomial uploads, C = A∘B");
+        let ac = self.h_to_coset(&a1, &a2, n, coset)?;
+        let bc = self.h_to_coset(&b1, &b2, n, coset)?;
+        let cc = self.h_to_coset(&c1, &c2, n, coset)?;
+        let q: Buffer<Fr> = self.alloc(n)?;
+        self.run(
+            abi::POINTWISE_MUL_SUB,
+            ptr(&q),
+            n,
+            &[&slice(ac)[..], &slice(bc), &slice(cc)].concat(),
+        )?;
+        let quotient = self.read(&q)?;
+        phase.mark("3 coset transforms, quotient");
+        Ok(quotient)
+    }
+}
+
+/// The witness has the circuit's length and the constant 1 at index 0.
+fn check_witness(zkey: &Zkey, witness: &[Fr]) -> Result<()> {
+    if witness.len() != zkey.num_vars {
+        return Err(ProveError::WitnessLength {
+            expected: zkey.num_vars,
+            found: witness.len(),
+        }
+        .into());
+    }
+    if witness[0] != Fr::ONE {
+        return Err(ProveError::WitnessConstant.into());
+    }
+    Ok(())
 }
 
 /// A zkey uploaded once and kept on the device across proofs: the five point
