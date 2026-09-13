@@ -36,6 +36,26 @@ pub fn enabled() -> bool {
     )
 }
 
+/// What `RISC0_GROTH16_RESIDENT` asks for. Unset means AUTO: the backend
+/// chooses resident vs streaming from the memory budget against the device's
+/// free memory (`budget::Budget::choose`). `0`/`false`/`off` forces streaming;
+/// anything else forces resident.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// Decide from the budget and the device's free memory.
+    Auto,
+    /// The operator pinned the path (`true` = resident, `false` = streaming).
+    Force(bool),
+}
+
+/// Read the tristate choice from the environment.
+pub fn choice() -> Choice {
+    match std::env::var(RESIDENT_ENV) {
+        Err(_) => Choice::Auto,
+        Ok(v) => Choice::Force(!matches!(v.as_str(), "0" | "false" | "off")),
+    }
+}
+
 /// A zkey file's identity: path, length and modification time — enough to
 /// notice a replaced file at the same path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +95,15 @@ impl<T> Cache<T> {
     /// The value for `key`, building it with `prepare` when absent or stale.
     /// The lock is held while building (one upload at a time) and released
     /// before the caller proves, so proofs never serialise on it.
+    /// The cached value for `key`, if it is the one currently held — a
+    /// non-preparing peek, so an AUTO caller can skip its probe once a resident
+    /// zkey is already up.
+    pub fn peek(&self, key: &Key) -> Option<Arc<T>> {
+        let slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref()
+            .and_then(|(k, v)| (k == key).then(|| v.clone()))
+    }
+
     pub fn get_or_prepare(&self, key: Key, prepare: impl FnOnce() -> Result<T>) -> Result<Arc<T>> {
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((k, v)) = slot.as_ref() {
