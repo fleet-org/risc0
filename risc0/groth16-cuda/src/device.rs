@@ -32,7 +32,10 @@ use risc0_groth16_core::{
 };
 use risc0_groth16_oxide::{
     abi,
-    pipeline::{plan_ranges, reduce_all_windows, sort_all_windows, CHUNK, WINDOW_BITS},
+    pipeline::{
+        plan_ranges, reduce_all_windows, sort_all_windows, sort_all_windows_parallel, CHUNK,
+        WINDOW_BITS,
+    },
     schedule::{self, Buf, Step, Twiddles},
 };
 
@@ -317,7 +320,58 @@ impl CudaProver {
     /// sort (`pipeline::sort_all_windows`), one `bucket_sum` launch over
     /// `windows · buckets` outputs, then the reduction and Horner on the host
     /// — two launches and two reads per MSM instead of two per window.
+    /// The original single-launch multi-scalar multiplication: one
+    /// `bucket_sum` launch of `windows · buckets` outputs, one thread per
+    /// bucket. Kept as the proven reference (it is byte-identical to the core
+    /// prover through the fixture) and the differential partner of
+    /// [`Self::msm_planned`]; the prove paths use the planned one. The kernel
+    /// check runs both and requires them to agree.
     fn msm<F: Field + Copy>(
+        &self,
+        kernel: &str,
+        points: &Buffer<Affine<F>>,
+        scalars: &[Fr],
+    ) -> Result<Jacobian<F>> {
+        assert_eq!(points.len(), scalars.len(), "MSM point and scalar counts");
+        let n = scalars.len();
+        let w = WINDOW_BITS;
+        let buckets = (1usize << w) - 1;
+        let windows = 256u32.div_ceil(w) as usize;
+        let canonical: Vec<[u64; 4]> = scalars.iter().map(Fr::to_canonical).collect();
+        let canonical_b = self.upload(&canonical)?;
+        let digits_b: Buffer<u32> = self.alloc(windows * n)?;
+        self.run(
+            abi::DIGITS_ALL,
+            ptr(&digits_b),
+            windows * n,
+            &[&slice(&canonical_b)[..], &[Arg::U32(w)]].concat(),
+        )?;
+        let digits = self.read(&digits_b)?;
+        drop((digits_b, canonical_b));
+        let (order, starts) = sort_all_windows(&digits, n, buckets);
+        if order.is_empty() {
+            return Ok(Jacobian::INFINITY);
+        }
+        let order_b = self.upload(&order)?;
+        let starts_b = self.upload(&starts)?;
+        let sums_b: Buffer<Jacobian<F>> = self.alloc(windows * buckets)?;
+        self.run(
+            kernel,
+            ptr(&sums_b),
+            windows * buckets,
+            &[&slice(points)[..], &slice(&order_b), &slice(&starts_b)].concat(),
+        )?;
+        let sums = self.read(&sums_b)?;
+        Ok(horner(&reduce_all_windows(&sums, buckets), w))
+    }
+
+    /// [`Self::msm`] with the bucket-sum work bounded so no thread adds a long
+    /// chain (C21): the windows sorted in parallel, then `bucket_sum` over
+    /// pieces of at most [`CHUNK`] points (`kernels.0`), then the levels of
+    /// `jacobian_sum` (`kernels.1`) the plan needs, then the reduction. It
+    /// returns the same point as [`Self::msm`]; this is what the prove paths
+    /// run.
+    fn msm_planned<F: Field + Copy>(
         &self,
         kernels: (&str, &str),
         points: &Buffer<Affine<F>>,
@@ -340,7 +394,7 @@ impl CudaProver {
         let digits = self.read(&digits_b)?;
         drop((digits_b, canonical_b));
         let mut phase = Phase::new();
-        let (order, starts) = sort_all_windows(&digits, n, buckets);
+        let (order, starts) = sort_all_windows_parallel(&digits, n, buckets);
         phase.mark("  msm: host sort");
         if order.is_empty() {
             return Ok(Jacobian::INFINITY);
@@ -508,15 +562,16 @@ impl CudaProver {
         };
         let quotient = self.transform_phase(&a_poly, &b_poly, n, &coset, &mut phase)?;
         let private = &witness[zkey.num_public + 1..];
-        let h = self.msm((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.ph, &quotient)?;
+        let h = self.msm_planned((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.ph, &quotient)?;
         phase.mark("MSM h (G1)");
-        let a = self.msm((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.pa, witness)?;
+        let a = self.msm_planned((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.pa, witness)?;
         phase.mark("MSM a (G1)");
-        let b1 = self.msm((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.pb1, witness)?;
+        let b1 = self.msm_planned((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.pb1, witness)?;
         phase.mark("MSM b1 (G1)");
-        let b2 = self.msm::<Fp2>((abi::BUCKET_SUM_G2, abi::JACOBIAN_SUM_G2), &z.pb2, witness)?;
+        let b2 =
+            self.msm_planned::<Fp2>((abi::BUCKET_SUM_G2, abi::JACOBIAN_SUM_G2), &z.pb2, witness)?;
         phase.mark("MSM b2 (G2)");
-        let c = self.msm((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.pc, private)?;
+        let c = self.msm_planned((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &z.pc, private)?;
         phase.mark("MSM c (G1)");
         let msms = Msms { h, a, b1, b2, c };
         let proof = assemble(zkey, &msms, r, s);
@@ -570,7 +625,7 @@ impl CudaProver {
         let private = &witness[zkey.num_public + 1..];
         let msm_g1 = |points: &[Affine<Fp>], scalars: &[Fr]| -> Result<Jacobian<Fp>> {
             let pb = self.upload(points)?;
-            self.msm((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &pb, scalars)
+            self.msm_planned((abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1), &pb, scalars)
         };
         let h = msm_g1(&zkey.h, &quotient)?;
         phase.mark("MSM h (G1, streamed)");
@@ -580,7 +635,7 @@ impl CudaProver {
         phase.mark("MSM b1 (G1, streamed)");
         let b2 = {
             let pb2 = self.upload(&zkey.b2)?;
-            self.msm::<Fp2>((abi::BUCKET_SUM_G2, abi::JACOBIAN_SUM_G2), &pb2, witness)?
+            self.msm_planned::<Fp2>((abi::BUCKET_SUM_G2, abi::JACOBIAN_SUM_G2), &pb2, witness)?
         };
         phase.mark("MSM b2 (G2, streamed)");
         let c = msm_g1(&zkey.c, private)?;
@@ -773,7 +828,7 @@ impl CudaProver {
         };
         let c = Cases::new();
         let n = c.n;
-        let mut out = Vec::with_capacity(abi::KERNELS.len() + 3);
+        let mut out = Vec::with_capacity(abi::KERNELS.len() + 5);
         let mut record = |kernel: &'static str, r: Result<String>| {
             out.push(match r {
                 Ok(detail) => KernelCheck::from_detail(kernel, detail),
@@ -965,12 +1020,22 @@ impl CudaProver {
                 &c.jacobian_sums_g2(),
             ),
         );
-        // end-to-end MSM (digits + host sort + bucket sums + reduction + Horner)
+        // end-to-end MSM (digits + host sort + bucket sums + reduction + Horner),
+        // both the single-launch reference and the bounded-chain planned path —
+        // each against the naive expectation, so the two are shown to agree
         record(
             "msm (g1)",
             (|| {
                 let pb = self.upload(&c.msm_g1)?;
-                let got = self.msm(
+                let got = self.msm(abi::BUCKET_SUM_G1, &pb, &c.msm_scalars)?;
+                Ok(first_point_diff(&[got], &[c.msm_g1()]))
+            })(),
+        );
+        record(
+            "msm planned (g1)",
+            (|| {
+                let pb = self.upload(&c.msm_g1)?;
+                let got = self.msm_planned(
                     (abi::BUCKET_SUM_G1, abi::JACOBIAN_SUM_G1),
                     &pb,
                     &c.msm_scalars,
@@ -982,7 +1047,15 @@ impl CudaProver {
             "msm (g2)",
             (|| {
                 let pb = self.upload(&c.msm_g2)?;
-                let got = self.msm::<Fp2>(
+                let got = self.msm::<Fp2>(abi::BUCKET_SUM_G2, &pb, &c.msm_scalars)?;
+                Ok(first_point_diff(&[got], &[c.msm_g2()]))
+            })(),
+        );
+        record(
+            "msm planned (g2)",
+            (|| {
+                let pb = self.upload(&c.msm_g2)?;
+                let got = self.msm_planned::<Fp2>(
                     (abi::BUCKET_SUM_G2, abi::JACOBIAN_SUM_G2),
                     &pb,
                     &c.msm_scalars,

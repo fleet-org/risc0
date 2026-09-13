@@ -224,6 +224,15 @@ production circuit — and the CPU launcher runs the identical plan under the by
 test. Twelve kernels in the ABI now; `ptx-c21` carries the PTX; kernel check 15/15 on the device for
 both modules. The host's counting sort (W-14) stays.
 
+**Landed (C22, the orchestration made additive and the host sort parallelised):** on review, the
+bounded-chain MSM is kept as a NEW function (`msm_planned`) beside the proven single-launch `msm`,
+in the shared pipeline, the CUDA host and the Metal host; the prove paths run `msm_planned` and the
+kernel check runs BOTH and requires each to equal the naive answer (17 checks, 17/17 on the device
+for both modules; the fixture proof byte-identical on every executor). The per-window counting sort
+runs in parallel (`sort_all_windows_parallel`; `sort_all_windows` stays serial as the reference):
+the `h` MSM's host sort 0.90 s → 0.68 s, each witness MSM's 0.21 s → ≈ 0.09 s. No kernel changed, so
+`ptx-c21` still loads.
+
 **Landed (C15, the CUDA arm on hardware):** on an RTX 5080 (`sm_120`, driver 580.95.05),
 `groth16-cuda-kernel-check` against the `ptx-c13` release passed every kernel, both MSMs and the
 fixture proof for the `sm_120` module and for the `sm_89` module through the driver's JIT —

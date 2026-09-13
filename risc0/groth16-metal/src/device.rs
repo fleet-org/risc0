@@ -39,7 +39,9 @@ use risc0_groth16_core::{
     zkey::Zkey,
 };
 pub use risc0_groth16_oxide::check::KernelCheck;
-use risc0_groth16_oxide::pipeline::{plan_ranges, reduce_all_windows, sort_all_windows, CHUNK};
+use risc0_groth16_oxide::pipeline::{
+    plan_ranges, reduce_all_windows, sort_all_windows, sort_all_windows_parallel, CHUNK,
+};
 
 use crate::{pack, WINDOW_BITS};
 
@@ -209,12 +211,75 @@ impl<B: Backend> Prover<B> {
 
     /// One MSM over every window at once: one `digits_all` launch, the host
     /// sort (`pipeline::sort_all_windows`), one `bucket_sum` launch over
-    /// pieces of at most [`CHUNK`] points, then the levels of `jacobian_sum`
-    /// the plan (`pipeline::plan_ranges`) needs until there is one sum per
-    /// `(window, bucket)`, then the reduction and Horner on the host — no
-    /// thread adds a long chain (C21). `kernels` names the bucket-sum and the
-    /// Jacobian-sum kernel of the group.
+    /// `windows · buckets` outputs, then the reduction and Horner on the host
+    /// — two launches and two reads per MSM instead of two per window.
+    /// The original single-launch multi-scalar multiplication: one
+    /// `bucket_sum` launch of `windows · buckets` outputs, one thread per
+    /// bucket. Kept as the proven reference (it is byte-identical to the core
+    /// prover through the fixture) and the differential partner of
+    /// [`Self::msm_planned`]; the prove paths use the planned one. The kernel
+    /// check runs both and requires them to agree.
     fn msm<F: Field>(
+        &self,
+        kernel: &str,
+        points: &B::Buf,
+        n_points: usize,
+        point_bytes: usize,
+        scalars: &[Fr],
+        unpack: impl Fn(&[u8]) -> Vec<Jacobian<F>>,
+    ) -> Jacobian<F> {
+        assert_eq!(n_points, scalars.len(), "MSM point and scalar counts");
+        let n = scalars.len();
+        let w = WINDOW_BITS;
+        let buckets = (1usize << w) - 1;
+        let windows = 256u32.div_ceil(w) as usize;
+        let canonical = self.upload(&pack::pack_canonical(scalars));
+        let digits_b = self.alloc(windows * n * 4);
+        self.run(
+            "digits_all",
+            windows * n,
+            &[
+                Arg::Buf(&canonical),
+                Arg::Bytes(&(n as u32).to_le_bytes()),
+                Arg::Bytes(&w.to_le_bytes()),
+                Arg::Buf(&digits_b),
+            ],
+        );
+        let digits: Vec<u32> = self
+            .read(&digits_b, windows * n * 4)
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        drop((digits_b, canonical));
+        let (order, starts) = sort_all_windows(&digits, n, buckets);
+        if order.is_empty() {
+            return Jacobian::INFINITY;
+        }
+        let order_b = self.upload(&u32s(&order));
+        let starts_b = self.upload(&u32s(&starts));
+        let sum_bytes = point_bytes * 3 / 2;
+        let sums = self.alloc(windows * buckets * sum_bytes);
+        self.run(
+            kernel,
+            windows * buckets,
+            &[
+                Arg::Buf(points),
+                Arg::Buf(&order_b),
+                Arg::Buf(&starts_b),
+                Arg::Buf(&sums),
+            ],
+        );
+        let jac = unpack(&self.read(&sums, windows * buckets * sum_bytes));
+        horner(&reduce_all_windows(&jac, buckets), w)
+    }
+
+    /// [`Self::msm`] with the bucket-sum work bounded so no thread adds a long
+    /// chain (C21): the windows sorted in parallel, then `bucket_sum` over
+    /// pieces of at most [`CHUNK`] points (`kernels.0`), then the levels of
+    /// `jacobian_sum` (`kernels.1`) the plan needs, then the reduction. It
+    /// returns the same point as [`Self::msm`]; this is what the prove paths
+    /// run.
+    fn msm_planned<F: Field>(
         &self,
         kernels: (&str, &str),
         points: &B::Buf,
@@ -246,7 +311,7 @@ impl<B: Backend> Prover<B> {
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
             .collect();
         drop((digits_b, canonical));
-        let (order, starts) = sort_all_windows(&digits, n, buckets);
+        let (order, starts) = sort_all_windows_parallel(&digits, n, buckets);
         if order.is_empty() {
             return Jacobian::INFINITY;
         }
@@ -476,7 +541,7 @@ impl<B: Backend> Prover<B> {
         let [na, nb1, nc, nh, nb2] = z.counts;
         let private = &witness[zkey.num_public + 1..];
         let g1 = |points, count, scalars: &[Fr]| {
-            self.msm(
+            self.msm_planned(
                 ("bucket_sum_g1", "jacobian_sum_g1"),
                 points,
                 count,
@@ -489,7 +554,7 @@ impl<B: Backend> Prover<B> {
             h: g1(&z.ph, nh, &quotient),
             a: g1(&z.pa, na, witness),
             b1: g1(&z.pb1, nb1, witness),
-            b2: self.msm::<Fp2>(
+            b2: self.msm_planned::<Fp2>(
                 ("bucket_sum_g2", "jacobian_sum_g2"),
                 &z.pb2,
                 nb2,
@@ -688,11 +753,13 @@ impl<B: Backend> Prover<B> {
                 first_point_diff(&got, &c.jacobian_sums_g2()),
             ));
         }
-        // end-to-end MSM (digits + host sort + bucket sums + reduction + Horner)
+        // end-to-end MSM (digits + host sort + bucket sums + reduction + Horner),
+        // both the single-launch reference and the bounded-chain planned path —
+        // each against the naive expectation, so the two are shown to agree
         {
             let pb = self.upload(&pack::pack_g1(&c.msm_g1));
             let got = self.msm(
-                ("bucket_sum_g1", "jacobian_sum_g1"),
+                "bucket_sum_g1",
                 &pb,
                 c.msm_g1.len(),
                 64,
@@ -703,9 +770,21 @@ impl<B: Backend> Prover<B> {
                 "msm (g1)",
                 first_point_diff(&[got], &[c.msm_g1()]),
             ));
+            let got = self.msm_planned(
+                ("bucket_sum_g1", "jacobian_sum_g1"),
+                &pb,
+                c.msm_g1.len(),
+                64,
+                &c.msm_scalars,
+                pack::unpack_jac_g1,
+            );
+            out.push(KernelCheck::from_detail(
+                "msm planned (g1)",
+                first_point_diff(&[got], &[c.msm_g1()]),
+            ));
             let pb2 = self.upload(&pack::pack_g2(&c.msm_g2));
             let got = self.msm::<Fp2>(
-                ("bucket_sum_g2", "jacobian_sum_g2"),
+                "bucket_sum_g2",
                 &pb2,
                 c.msm_g2.len(),
                 128,
@@ -714,6 +793,18 @@ impl<B: Backend> Prover<B> {
             );
             out.push(KernelCheck::from_detail(
                 "msm (g2)",
+                first_point_diff(&[got], &[c.msm_g2()]),
+            ));
+            let got = self.msm_planned::<Fp2>(
+                ("bucket_sum_g2", "jacobian_sum_g2"),
+                &pb2,
+                c.msm_g2.len(),
+                128,
+                &c.msm_scalars,
+                pack::unpack_jac_g2,
+            );
+            out.push(KernelCheck::from_detail(
+                "msm planned (g2)",
                 first_point_diff(&[got], &[c.msm_g2()]),
             ));
         }
@@ -1053,7 +1144,7 @@ mod host_tests {
     fn shaders_on_the_cpu_agree_with_the_rust_bodies_down_to_a_fixture_proof() {
         let prover = HostMslProver::new().unwrap();
         let checks = prover.kernel_check().unwrap();
-        assert_eq!(checks.len(), 15, "12 kernels, 2 MSMs, 1 proof");
+        assert_eq!(checks.len(), 17, "12 kernels, 4 MSMs, 1 proof");
         for c in &checks {
             assert!(c.ok, "{}: {}", c.kernel, c.detail);
         }
