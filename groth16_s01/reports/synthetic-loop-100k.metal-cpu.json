@@ -17,13 +17,13 @@
       "Killed": "rejected against no second case; used the own digest with bit 0 flipped: verification indicates proof is invalid"
     },
     "canonical_answers": {
-      "NotRun": "cannot rebuild a registry with `canonical` in this harness"
+      "Killed": "control `reference` answered and verified; registry reported `reference`; a registry without `metal-cpu` refuses it"
     },
     "malformed_input": {
       "Killed": "rejected before the boundary (bincode): io error: unexpected end of file"
     }
   },
-  "derive_seconds": 26.156365062,
-  "prove_seconds": 424.512084522,
+  "derive_seconds": 26.055612754000002,
+  "prove_seconds": 405.590234395,
   "oracle": "risc0-groth16 3.0.3 (workspace at the milestone base tag v3.0.4) `Verifier` via risc0-zkvm 3.0.4 `Groth16Receipt::verify_integrity_with_context`"
 }

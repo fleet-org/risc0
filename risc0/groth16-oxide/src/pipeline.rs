@@ -129,6 +129,46 @@ pub fn sort_all_windows(digits: &[u32], n: usize, buckets: usize) -> (Vec<u32>, 
     (order, starts)
 }
 
+/// [`sort_all_windows`] with the windows' counting sorts run on separate
+/// threads (each is independent) and the results stitched in order — the
+/// same `(order, starts)`, laid out identically, so the two are
+/// interchangeable. The `h` MSM's sort of 22 × 2²³ digits was 0.9 s
+/// single-threaded, the largest host item once the device chain is bounded
+/// (C21); this is what [`msm_planned`] and the device hosts call. The no_std
+/// device build has no threads and falls back to the serial function (it
+/// never calls this at run time).
+#[cfg(feature = "std")]
+pub fn sort_all_windows_parallel(digits: &[u32], n: usize, buckets: usize) -> (Vec<u32>, Vec<u32>) {
+    assert_eq!(digits.len() % n, 0, "digits must hold whole windows");
+    let windows = digits.len() / n;
+    let mut per: Vec<(Vec<u32>, Vec<u32>)> = Vec::with_capacity(windows);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..windows)
+            .map(|w| {
+                scope.spawn(move || counting_sort_by_digit(&digits[w * n..(w + 1) * n], buckets))
+            })
+            .collect();
+        for h in handles {
+            per.push(h.join().expect("a window sort thread panicked"));
+        }
+    });
+    let mut order = Vec::with_capacity(digits.len());
+    let mut starts = Vec::with_capacity(windows * buckets + 1);
+    for (o, s) in &per {
+        let base = order.len() as u32;
+        starts.extend(s[..buckets].iter().map(|x| base + x));
+        order.extend_from_slice(o);
+    }
+    starts.push(order.len() as u32);
+    (order, starts)
+}
+
+/// The no_std fallback: the serial function (the device build never calls it).
+#[cfg(not(feature = "std"))]
+pub fn sort_all_windows_parallel(digits: &[u32], n: usize, buckets: usize) -> (Vec<u32>, Vec<u32>) {
+    sort_all_windows(digits, n, buckets)
+}
+
 /// The longest chain one thread adds in an MSM's bucket sums, and in every
 /// level of the reduction above them. MEASURED on an RTX 5080 (C21,
 /// `groth16-cuda-msm-bench`, 2^20 uniform scalars, 22 windows, the same
@@ -209,6 +249,35 @@ pub fn msm<L: Launcher, F: Field + Send + Sync>(
     let mut digits = vec![0u32; windows * n];
     l.map(&mut digits, |i| kernels::digit_all(i, &canonical, w));
     let (order, starts) = sort_all_windows(&digits, n, buckets);
+    let mut sums = vec![Jacobian::<F>::INFINITY; windows * buckets];
+    l.map(&mut sums, |b| {
+        kernels::bucket_sum(b, points, &order, &starts)
+    });
+    horner(&reduce_all_windows(&sums, buckets), w)
+}
+
+/// The same multi-scalar multiplication as [`msm`], with the bucket-sum work
+/// bounded so no thread adds a long chain (C21): the parallel window sort,
+/// then `bucket_sum` over pieces of at most [`CHUNK`] points, then the levels
+/// of `jacobian_sum` the plan needs, then the same reduction and Horner. It
+/// returns the same point as [`msm`] (the plan only reassociates the sum);
+/// the kernel check asserts the two agree, and this is the path the device
+/// provers run. Kept beside [`msm`] rather than replacing it so the proven
+/// single-launch orchestration stays as the in-repo reference.
+pub fn msm_planned<L: Launcher, F: Field + Send + Sync>(
+    l: &L,
+    points: &[Affine<F>],
+    scalars: &[Fr],
+) -> Jacobian<F> {
+    assert_eq!(points.len(), scalars.len());
+    let canonical: Vec<[u64; 4]> = scalars.iter().map(Fr::to_canonical).collect();
+    let n = points.len();
+    let w = WINDOW_BITS;
+    let buckets = (1usize << w) - 1;
+    let windows = 256u32.div_ceil(w) as usize;
+    let mut digits = vec![0u32; windows * n];
+    l.map(&mut digits, |i| kernels::digit_all(i, &canonical, w));
+    let (order, starts) = sort_all_windows_parallel(&digits, n, buckets);
     let plan = plan_ranges(&starts, CHUNK);
     let mut sums = vec![Jacobian::<F>::INFINITY; plan[0].len() - 1];
     l.map(&mut sums, |b| {
@@ -287,12 +356,14 @@ pub fn prove_grouped<L: Launcher>(
     });
     drop((a_c, b_c, c_c));
 
+    // the bounded-chain orchestration, the same path the device provers run
+    // (C21); `msm` is kept as the single-launch reference and cross-checked
     let msms = Msms {
-        h: msm(l, &zkey.h, &quotient),
-        a: msm(l, &zkey.a, witness),
-        b1: msm(l, &zkey.b1, witness),
-        b2: msm(l, &zkey.b2, witness),
-        c: msm(l, &zkey.c, &witness[zkey.num_public + 1..]),
+        h: msm_planned(l, &zkey.h, &quotient),
+        a: msm_planned(l, &zkey.a, witness),
+        b1: msm_planned(l, &zkey.b1, witness),
+        b2: msm_planned(l, &zkey.b2, witness),
+        c: msm_planned(l, &zkey.c, &witness[zkey.num_public + 1..]),
     };
     Ok(assemble(zkey, &msms, r, s))
 }
@@ -459,6 +530,12 @@ mod tests {
         let expected = risc0_groth16_core::msm::msm_naive(&pts, &ks);
         assert_eq!(msm(&CpuLauncher { threads: 3 }, &pts, &ks), expected);
         assert_eq!(msm(&SerialLauncher, &pts, &ks), expected);
+        // the bounded-chain path returns the same point as the single-launch one
+        assert_eq!(
+            msm_planned(&CpuLauncher { threads: 3 }, &pts, &ks),
+            expected
+        );
+        assert_eq!(msm_planned(&SerialLauncher, &pts, &ks), expected);
     }
 
     #[test]

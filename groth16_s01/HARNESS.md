@@ -222,6 +222,24 @@ MSMs 5.1 s — h 1.89, a 0.73, b1 0.71, b2 1.05, c 0.71). Reports:
 [`reports/synthetic-loop-100k.cuda-oxide.md`](./reports/synthetic-loop-100k.cuda-oxide.md),
 [`reports/synthetic-loop-0.cuda-oxide.md`](./reports/synthetic-loop-0.cuda-oxide.md).
 
+**The host counting sort in parallel (C22) — MEASURED 2026-09-13.** Once the device chain is
+bounded, the largest host item is the per-window counting sort, with the GPU idle through it. The
+windows are independent, so `sort_all_windows_parallel` runs them on separate threads (24 on this
+box) and stitches the results in order; `sort_all_windows` stays as the serial reference. On the
+streaming run the `h` MSM's host sort fell from 0.90 s to 0.68 s and each witness MSM's from 0.21 s
+to ≈ 0.09 s — ≈ 0.6 s off a ≈ 6.7 s device-side proof; the memory-bound stitch (740 MB of `order`
+for `h`) is the floor. The two GPU hosts and the CPU launcher share the function, so the metal-cpu
+arm and the byte-identical-proof test cover it.
+
+**One steer shaped C22's form.** The bounded-chain orchestration of C21 was written by mutating the
+proven `msm` in place; on review that was changed to keep the original single-launch `msm` as the
+in-repo reference and add the bounded-chain path as `msm_planned` beside it (in the shared pipeline,
+the CUDA host and the Metal host), with the prove paths calling `msm_planned` and the kernel check
+running BOTH and requiring each to equal the naive expectation. The device kernel check is 17 checks
+now (was 15): every kernel, `msm (g1/g2)`, `msm planned (g1/g2)`, and the fixture proof — 17/17 on
+the RTX 5080 for the `sm_120` and the `sm_89` module. The kernels are unchanged, so `ptx-c21` still
+loads.
+
 **What the numbers mean.** The arm's first production-scale proof on a device verifies under the
 upstream verifier with every mutation arm killed. 125.7 s is an unoptimised arm — serial bucket
 loops per thread, the host's counting sort of 22 × 5.6M digits per MSM, 493 MB read back per MSM —
@@ -266,15 +284,19 @@ the streaming arm (2.5 GiB) is what runs when the tenant is not.
 The Metal arm has no device in this session; its shaders, compiled as C++ (C14), prove the
 production circuit on the CPU through the same boundary and the same harness:
 
-| case                | rewrite   | rewrite verifies (1) | bit-flip | cross-claim | canonical answers   | malformed input | derive s | prove s |
-| ------------------- | --------- | -------------------- | -------- | ----------- | ------------------- | --------------- | -------: | ------: |
-| synthetic-loop-100k | metal-cpu | **yes**              | killed   | killed      | not run (see below) | killed          |     26.2 |   424.5 |
+| case                | rewrite                                  | rewrite verifies (1) | bit-flip | cross-claim | canonical answers   | malformed input | derive s | prove s |
+| ------------------- | ---------------------------------------- | -------------------- | -------- | ----------- | ------------------- | --------------- | -------: | ------: |
+| synthetic-loop-100k | metal-cpu                                | **yes**              | killed   | killed      | not run (see below) | killed          |     26.2 |   424.5 |
+| synthetic-loop-100k | metal-cpu (C21 plan + C22 parallel sort) | **yes** (2026-09-13) | killed   | killed      | not run             | killed          |     26.1 |   405.6 |
 
 Full row in
 [`reports/synthetic-loop-100k.metal-cpu.md`](./reports/synthetic-loop-100k.metal-cpu.md). 424.5 s is
 the shader source run one thread index at a time on one core; it is a correctness run, not a timing.
-What a Mac adds is the Metal compiler and the device: the arithmetic, the layouts and the whole
-pipeline down to a verifying production proof are established here.
+Re-run 2026-09-13 with the bounded-chain plan (C21) and the parallel host sort (C22) it verifies at
+405.6 s (backend prove 391.7 s); the plan and the parallel sort help the CPU arm too, but this stays
+a correctness result, not a timing one. What a Mac adds is the Metal compiler and the device: the
+arithmetic, the layouts and the whole pipeline down to a verifying production proof are established
+here.
 
 The `canonical answers` arm reports _not run_ because this harness binary was built with the
 canonical CUDA kernels compiled in (`--features cuda-canonical`) and the arm then insists on
