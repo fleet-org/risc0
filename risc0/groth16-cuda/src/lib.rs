@@ -47,11 +47,15 @@ pub mod module;
 
 pub use device::{CudaProver, KernelCheck, ResidentZkey};
 pub use module::ModuleSource;
+
 use risc0_groth16_core::{
     field::Fr,
     prover::{CoefficientGroups, Proof},
     zkey::Zkey,
 };
+/// The device memory budget (re-exported from risc0-groth16-oxide) — the
+/// VRAM-aware resident-vs-streaming choice reads it.
+pub use risc0_groth16_oxide::budget;
 
 /// Produce a proof on the GPU named by the environment
 /// (`RISC0_GROTH16_CUDA_MODULE`, device 0), grouping the zkey's coefficients

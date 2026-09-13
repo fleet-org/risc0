@@ -1094,6 +1094,15 @@ impl CudaProver {
         device_free()
     }
 
+    /// The device's free memory in bytes, or `None` if the driver query fails
+    /// — for the VRAM-aware resident-vs-streaming choice (`budget::Budget`).
+    pub fn free_device_bytes(&self) -> Option<usize> {
+        let (mut free, mut total) = (0usize, 0usize);
+        // SAFETY: a plain driver query on this prover's current context.
+        let rc = unsafe { cuda_core::sys::cuMemGetInfo_v2(&mut free, &mut total) };
+        (rc == 0).then_some(free)
+    }
+
     /// `bucket_sum_g1` over `points` with the ranges `starts[b]..starts[b+1]`
     /// of `order`, launched `repeats` times. Returns the wall-clock seconds
     /// of each launch (between two stream synchronizations; the uploads are

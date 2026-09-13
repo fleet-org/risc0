@@ -38,6 +38,7 @@
 
 pub mod abi;
 #[cfg(feature = "std")]
+pub mod budget;
 pub mod check;
 pub mod kernels;
 #[cfg(feature = "std")]
